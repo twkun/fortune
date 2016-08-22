@@ -47,10 +47,10 @@ https://github.com/fortunejs/fortune/tree/master/website
   adapter: <span class="hljs-meta">[</span>
     <span class="hljs-comment">// Must be a class that extends `Fortune.Adapter`, or a function</span>
     <span class="hljs-comment">// that accepts the Adapter class and returns a subclass. Required.</span>
-    Adapter =&gt; { <span class="hljs-attr">...</span> },
+    Adapter =&gt; { <span class="hljs-params">...</span> },
 
     <span class="hljs-comment">// An options object that is specific to the adapter. Optional.</span>
-    { <span class="hljs-attr">...</span> }
+    { <span class="hljs-params">...</span> }
   <span class="hljs-meta">]</span>
 }
 </code></pre></li><li><p><code>transforms</code>: keyed by type name, valued by an array containing an <code>input</code> and/or <code>output</code> function at indices <code>0</code> and <code>1</code> respectively.</p><p>A transform function takes at least two arguments, the internal <code>context</code> object and a single <code>record</code>. A special case is the <code>update</code> argument for the <code>update</code> method.</p><p>There are two kinds of transforms, before a record is written to transform input, and after it is read to transform output, both are optional. If an error occurs within an transform function, it will be forwarded to the response. Use typed errors to provide the appropriate feedback. It is varant to note that <code>output</code> transforms are run every time a record is shown in a response, so it should be idempotent.</p><p>For a create request, the input transform must return the second argument <code>record</code> either synchronously, or asynchronously as a Promise. The return value of a delete request is inconsequential, but it may return a value or a Promise. There is a special case of the <code>update</code> method accepting a <code>update</code> object as a third parameter, which must be returned synchronously or as a Promise.</p><p>An example transform to apply a timestamp on a record before creation, and displaying the timestamp in the server&#39;s locale:</p><pre><code class="lang-js">{
