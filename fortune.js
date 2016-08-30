@@ -2385,8 +2385,8 @@ Fortune.prototype.request = function (options) {
 
 /**
  * The `find` method retrieves record by type given IDs, querying options,
- * or both. It wraps around the `request` method, see the `request` method for
- * documentation on its arguments.
+ * or both. This is a convenience method that wraps around the `request`
+ * method, see the `request` method for documentation on its arguments.
  *
  * @param {String} type
  * @param {*|*[]} [ids]
@@ -2409,9 +2409,9 @@ Fortune.prototype.find = function () {
 
 
 /**
- * The `create` method creates records by type given records to create. It
- * wraps around the `request` method, see the request `method` for
- * documentation on its arguments.
+ * The `create` method creates records by type given records to create. This
+ * is a convenience method that wraps around the `request` method, see the
+ * request `method` for documentation on its arguments.
  *
  * @param {String} type
  * @param {Object|Object[]} records
@@ -2431,9 +2431,10 @@ Fortune.prototype.create = function () {
 
 
 /**
- * The `update` method updates records by type given update objects. It wraps
- * around the `request` method, see the `request` method for documentation on
- * its arguments.
+ * The `update` method updates records by type given update objects. See the
+ * [Adapter.update](#adapter-update) method for the format of the update
+ * objects. This is a convenience method that wraps around the `request`
+ * method, see the `request` method for documentation on its arguments.
  *
  * @param {String} type
  * @param {Object|Object[]} updates
@@ -2453,9 +2454,9 @@ Fortune.prototype.update = function () {
 
 
 /**
- * The `delete` method deletes records by type given IDs (optional). It wraps
- * around the `request` method, see the `request` method for documentation on
- * its arguments.
+ * The `delete` method deletes records by type given IDs (optional). This is a
+ * convenience method that wraps around the `request` method, see the `request`
+ * method for documentation on its arguments.
  *
  * @param {String} type
  * @param {*|*[]} [ids]
