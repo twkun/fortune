@@ -1,6 +1,6 @@
 /*!
  * Fortune.js
- * Version 4.1.9
+ * Version 4.2.0
  * MIT License
  * http://fortune.js.org
  */
@@ -113,12 +113,17 @@ exports.applyOptions = function (fields, records, options, meta) {
 
 function check (type, a, b) {
   var matcher
+
   if (b === null) return a === null
+  if (!type) return a === b
+  if (type.compare) return type.compare(a, b) === 0
+
   matcher = find(matchCheck, function (pair) {
-    return pair[0] === type
+    return pair[0] === type.prototype.constructor
   })
-  return matcher ? matcher[1](a, b) :
-    type && type.equal ? type.equal(a, b) : a === b
+  if (matcher) return matcher[1](a, b)
+
+  return a === b
 }
 
 
@@ -185,13 +190,9 @@ function matchByRange (fields, ranges, record) {
     if (fieldIsArray) value = value ? value.length : 0
 
     if (!compare[field])
-      if (!fieldIsArray) {
-        compare[field] = fieldType.compare ||
-          find(comparisons, findKey(fieldType))[1]
-        if (!compare[field])
-          throw new Error('Missing "compare" function.')
-      }
-      else compare[field] = find(comparisons, findKey(Number))[1]
+      compare[field] = !fieldIsArray ? fieldType.compare ||
+        find(comparisons, findByType(fieldType))[1] :
+        find(comparisons, findByType(Number))[1]
 
     if (range[0] !== null && compare[field](value, range[0]) < 0)
       return false
@@ -204,9 +205,9 @@ function matchByRange (fields, ranges, record) {
 }
 
 
-function findKey (key) {
+function findByType (type) {
   return function (pair) {
-    return pair[0] === key
+    return pair[0] === type.prototype.constructor
   }
 }
 
@@ -232,7 +233,7 @@ function compare (fields, sort) {
       if (fieldIsArray) result = a.length - b.length
       else if (fieldType) {
         compare = fieldType.compare ||
-          find(comparisons, findKey(fieldType))[1]
+          find(comparisons, findByType(fieldType))[1]
         if (!compare) throw new Error('Missing "compare" function.')
         result = compare(a, b)
       }
@@ -247,7 +248,7 @@ function compare (fields, sort) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"../../common/array/find":11,"../../common/deep_equal":20,"../../common/errors":21,"../../common/keys":23,"../../common/message":24,"buffer":46}],2:[function(require,module,exports){
+},{"../../common/array/find":11,"../../common/deep_equal":20,"../../common/errors":21,"../../common/keys":23,"../../common/message":24,"buffer":47}],2:[function(require,module,exports){
 'use strict'
 
 var common = require('../common')
@@ -343,7 +344,6 @@ var common = require('../common')
 var generateId = common.generateId
 
 var constants = require('../../../common/constants')
-var internalKey = constants.internal
 var primaryKey = constants.primary
 
 var worker = require('./worker')
@@ -365,8 +365,6 @@ module.exports = function (Adapter) {
     MemoryAdapter.call(this, properties)
     if (!this.options.name) this.options.name = 'fortune'
   }
-
-  Object.defineProperty(IndexedDBAdapter, internalKey, { value: true })
 
   IndexedDBAdapter.prototype = Object.create(MemoryAdapter.prototype)
 
@@ -593,7 +591,7 @@ module.exports = function (Adapter) {
   return IndexedDBAdapter
 }
 
-},{"../../../common/array/reduce":15,"../../../common/assign":17,"../../../common/constants":19,"../common":1,"../memory":6,"./helpers":2,"./worker":4,"msgpack-lite":53}],4:[function(require,module,exports){
+},{"../../../common/array/reduce":15,"../../../common/assign":17,"../../../common/constants":19,"../common":1,"../memory":6,"./helpers":2,"./worker":4,"msgpack-lite":54}],4:[function(require,module,exports){
 'use strict'
 
 module.exports = worker
@@ -903,9 +901,6 @@ exports.outputRecord = function (type, record) {
 var applyUpdate = require('../../../common/apply_update')
 var map = require('../../../common/array/map')
 
-var constants = require('../../../common/constants')
-var internalKey = constants.internal
-
 var common = require('../common')
 var applyOptions = common.applyOptions
 
@@ -924,8 +919,6 @@ module.exports = function (Adapter) {
     if (!('recordsPerType' in this.options))
       this.options.recordsPerType = 1000
   }
-
-  Object.defineProperty(MemoryAdapter, internalKey, { value: true })
 
   MemoryAdapter.prototype = Object.create(Adapter.prototype)
 
@@ -1095,7 +1088,7 @@ module.exports = function (Adapter) {
   return MemoryAdapter
 }
 
-},{"../../../common/apply_update":10,"../../../common/array/map":13,"../../../common/constants":19,"../common":1,"./helpers":5}],7:[function(require,module,exports){
+},{"../../../common/apply_update":10,"../../../common/array/map":13,"../common":1,"./helpers":5}],7:[function(require,module,exports){
 'use strict'
 
 var assign = require('../common/assign')
@@ -1387,9 +1380,6 @@ var Adapter = require('./')
 var errors = require('../common/errors')
 var keys = require('../common/keys')
 var message = require('../common/message')
-var assign = require('../common/assign')
-var constants = require('../common/constants')
-var internalKey = constants.internal
 var promise = require('../common/promise')
 
 
@@ -1411,26 +1401,20 @@ function AdapterSingleton (properties) {
   if (!Adapter.prototype.isPrototypeOf(CustomAdapter.prototype))
     throw new TypeError('The adapter must inherit the Adapter class.')
 
-  return new CustomAdapter(assign({
+  return new CustomAdapter({
     options: input[1] || {},
     recordTypes: properties.recordTypes,
     errors: errors,
     keys: keys,
     message: message,
     Promise: promise.Promise
-  },
-  // The built-in adapters have some optimizations for cloning objects which
-  // are not needed for non-memory adapters.
-  CustomAdapter[internalKey] ?
-    { transforms: properties.transforms } :
-    null
-  ))
+  })
 }
 
 
 module.exports = AdapterSingleton
 
-},{"../common/assign":17,"../common/constants":19,"../common/errors":21,"../common/keys":23,"../common/message":24,"../common/promise":26,"./":7}],9:[function(require,module,exports){
+},{"../common/errors":21,"../common/keys":23,"../common/message":24,"../common/promise":26,"./":7}],9:[function(require,module,exports){
 'use strict'
 
 // Local modules.
@@ -1442,6 +1426,7 @@ var assign = require('./common/assign')
 var memory = require('./adapter/adapters/memory')
 var indexedDB = require('./adapter/adapters/indexeddb')
 var request = require('./net/websocket_request')
+var client = require('./net/websocket_client')
 var sync = require('./net/websocket_sync')
 
 var adapters = {
@@ -1451,6 +1436,7 @@ var adapters = {
 
 var net = {
   request: request,
+  client: client,
   sync: sync
 }
 
@@ -1504,7 +1490,7 @@ assign(Fortune, {
 
 module.exports = Fortune
 
-},{"./adapter/adapters/indexeddb":3,"./adapter/adapters/memory":6,"./common/assign":17,"./common/promise":26,"./core":28,"./net/websocket_request":40,"./net/websocket_sync":41}],10:[function(require,module,exports){
+},{"./adapter/adapters/indexeddb":3,"./adapter/adapters/memory":6,"./common/assign":17,"./common/promise":26,"./core":28,"./net/websocket_client":40,"./net/websocket_request":41,"./net/websocket_sync":42}],10:[function(require,module,exports){
 'use strict'
 
 var pull = require('./array/pull')
@@ -1732,8 +1718,7 @@ exports.inverse = 'inverse'
 exports.isArray = 'isArray'
 
 // Should be reserved for private use.
-exports.denormalizedInverse = '__denormalizedInverse'
-exports.internal = '__internal'
+exports.denormalizedInverse = '__denormalizedInverse__'
 
 // Events.
 exports.change = 'change'
@@ -1808,7 +1793,7 @@ function deepEqual (a, b) {
 module.exports = deepEqual
 
 }).call(this,{"isBuffer":require("../../node_modules/is-buffer/index.js")})
-},{"../../node_modules/is-buffer/index.js":52}],21:[function(require,module,exports){
+},{"../../node_modules/is-buffer/index.js":53}],21:[function(require,module,exports){
 'use strict'
 
 var responseClass = require('./response_classes')
@@ -2004,7 +1989,7 @@ function successClass (name) {
     'assign(this, x) }')(assign)
 }
 
-},{"./assign":17,"error-class":48}],28:[function(require,module,exports){
+},{"./assign":17,"error-class":49}],28:[function(require,module,exports){
 'use strict'
 
 var EventLite = require('event-lite')
@@ -2029,14 +2014,14 @@ var message = require('./common/message')
 
 /**
  * This is the default export of the `fortune` package. It implements a
- * subset of `EventEmitter`, and it has a few static properties attached to it
- * that may be useful to access:
+ * [subset of `EventEmitter`](https://www.npmjs.com/package/event-lite), and it
+ * has a few static properties attached to it that may be useful to access:
  *
  * - `Adapter`: abstract base class for the Adapter.
  * - `adapters`: included adapters, defaults to memory adapter. Note that the
  * browser build also includes `indexedDB` and `webStorage` adapters.
  * - `net`: network protocol helpers, varies based on client or server build.
- * - `errors`: custom typed errors, useful for throwing errors in transform
+ * - `errors`: custom typed errors, useful for throwing errors in I/O hook
  * functions.
  * - `methods`: a hash that maps to string constants. Available are: `find`,
  * `create`, `update`, and `delete`.
@@ -2061,11 +2046,46 @@ Fortune.prototype = Object.create(EventLite.prototype)
 /**
  * Create a new instance, the only required input is record type definitions.
  * The first argument must be an object keyed by name, valued by definition
- * objects. Here are some example field definitions:
+ * objects.
+ *
+ * Here are some example field definitions:
  *
  * ```js
  * {
- *   recordType: {
+ *   // Top level keys are names of record types.
+ *   person: {
+ *     // Data types may be singular or plural.
+ *     name: String, // Singular string value.
+ *     luckyNumbers: Array(Number), // Array of numbers.
+ *
+ *     // Relationships may be singular or plural. They must specify which
+ *     // record type it refers to, and may also specify an inverse field
+ *     // which is optional but recommended.
+ *     pets: [ Array('animal'), 'owner' ], // Has many.
+ *     employer: [ 'organization', 'employees' ], // Belongs to.
+ *     likes: Array('thing'), // Has many (no inverse).
+ *     doing: 'activity', // Belongs to (no inverse).
+ *
+ *     // Reflexive relationships are relationships in which the record type,
+ *     // the first position, is of the same type.
+ *     following: [ Array('person'), 'followers' ],
+ *     followers: [ Array('person'), 'following' ],
+ *
+ *     // Mutual relationships are relationships in which the inverse,
+ *     // the second position, is defined to be the same field on the same
+ *     // record type.
+ *     friends: [ Array('person'), 'friends' ],
+ *     spouse: [ 'person', 'spouse' ]
+ *   }
+ * }
+ * ```
+ *
+ * The above shows the shorthand which will be transformed internally to a
+ * more verbose data structure. The internal structure is as follows:
+ *
+ * ```js
+ * {
+ *   person: {
  *     // A singular value.
  *     name: { type: String },
  *
@@ -2092,16 +2112,19 @@ Fortune.prototype = Object.create(EventLite.prototype)
  * serializable object that may be persisted. The only other allowed type is
  * a `Function`, which may be used to define custom types.
  *
- * A type function should accept one argument, the value, and return a
+ * A custom type function should accept one argument, the value, and return a
  * boolean based on whether the value is valid for the type or not. It may
- * optionally have properties `sort` and `equal`, which should be valued as
- * functions.
+ * optionally have a method `compare`, used for sorting in the built-in
+ * adapters. The `compare` method should have the same signature as the native
+ * `Array.prototype.sort`.
  *
- * - `compare`: same signature as comparing with `Array.prototype.sort`.
- * - `equal`: return a boolean value if the two arguments are equal.
+ * A custom type function must inherit one of the allowed native types. For
+ * example:
  *
- * These optional functions are used for the memory adapter and web browser
- * adapters, but may not be run by other adapters.
+ * ```js
+ * function Integer (x) { return (x | 0) === x }
+ * Integer.prototype = Object.create(Number.prototype)
+ * ```
  *
  * The options object may contain the following keys:
  *
@@ -2122,45 +2145,38 @@ Fortune.prototype = Object.create(EventLite.prototype)
  *   }
  *   ```
  *
- * - `transforms`: keyed by type name, valued by an array containing an `input`
+ * - `hooks`: keyed by type name, valued by an array containing an `input`
  *   and/or `output` function at indices `0` and `1` respectively.
  *
- *   A transform function takes at least two arguments, the internal `context`
+ *   A hook function takes at least two arguments, the internal `context`
  *   object and a single `record`. A special case is the `update` argument for
  *   the `update` method.
  *
- *   There are two kinds of transforms, before a record is written to transform
- *   input, and after it is read to transform output, both are optional. If an
- *   error occurs within an transform function, it will be forwarded to the
- *   response. Use typed errors to provide the appropriate feedback. It is
- *   varant to note that `output` transforms are run every time a record is
- *   shown in a response, so it should be idempotent.
+ *   There are only two kinds of hooks, before a record is written (input),
+ *   and after a record is read (output), both are optional. If an error occurs
+ *   within a hook function, it will be forwarded to the response. Use typed
+ *   errors to provide the appropriate feedback.
  *
- *   For a create request, the input transform must return the second argument
+ *   For a create request, the input hook may return the second argument
  *   `record` either synchronously, or asynchronously as a Promise. The return
  *   value of a delete request is inconsequential, but it may return a value or
- *   a Promise. There is a special case of the `update` method accepting a
- *   `update` object as a third parameter, which must be returned synchronously
- *   or as a Promise.
+ *   a Promise. The `update` method accepts a `update` object as a third
+ *   parameter, which may be returned synchronously or as a Promise.
  *
- *   An example transform to apply a timestamp on a record before creation,
- *   and displaying the timestamp in the server's locale:
+ *   An example hook to apply a timestamp on a record before creation, and
+ *   displaying the timestamp in the server's locale:
  *
  *   ```js
  *   {
  *     recordType: [
  *       (context, record, update) => {
- *         const method = context.request.method
- *
- *         if (method === 'create') {
- *           record.timestamp = new Date()
- *           return record
+ *         switch (context.request.method) {
+ *           case 'create':
+ *             record.timestamp = new Date()
+ *             return record
+ *           case 'update': return update
+ *           case 'delete': return null
  *         }
- *
- *         if (update) return update
- *
- *         // If we get here, return value of the delete method doesn't matter.
- *         return null
  *       },
  *       (context, record) => {
  *         record.timestamp = record.timestamp.toLocaleString()
@@ -2173,7 +2189,7 @@ Fortune.prototype = Object.create(EventLite.prototype)
  *   Requests to update a record will **NOT** have the updates already applied
  *   to the record.
  *
- *   Another feature of the input transform is that it will have access to a
+ *   Another feature of the input hook is that it will have access to a
  *   temporary field `context.transaction`. This is useful for ensuring that
  *   bulk write operations are all or nothing. Each request is treated as a
  *   single transaction.
@@ -2221,7 +2237,7 @@ Fortune.prototype = Object.create(EventLite.prototype)
  */
 Fortune.prototype.constructor = function (recordTypes, options) {
   var self = this
-  var adapter, method, stack, flows, type, transforms, i, j
+  var adapter, method, stack, flows, type, hooks, i, j
 
   if (typeof recordTypes !== 'object')
     throw new TypeError('First argument must be an object.')
@@ -2229,9 +2245,12 @@ Fortune.prototype.constructor = function (recordTypes, options) {
   if (!Object.keys(recordTypes).length)
     throw new Error('At least one type must be specified.')
 
+  // DEPRECATION: "transforms" has been deprecated in favor of "hooks".
+  if ('transforms' in options) options.hooks = options.transforms
+
   if (!('adapter' in options)) options.adapter = [ memoryAdapter ]
   if (!('settings' in options)) options.settings = {}
-  if (!('transforms' in options)) options.transforms = {}
+  if (!('hooks' in options)) options.hooks = {}
   if (!('enforceLinks' in options.settings))
     options.settings.enforceLinks = true
 
@@ -2246,22 +2265,22 @@ Fortune.prototype.constructor = function (recordTypes, options) {
     flows[methods[method]] = stack
   }
 
-  transforms = options.transforms
+  hooks = options.hooks
 
-  // Validate transforms.
-  for (type in transforms) {
+  // Validate hooks.
+  for (type in hooks) {
     if (!(type in recordTypes)) throw new Error(
-      'Attempted to define transform on "' + type + '" type ' +
+      'Attempted to define hook on "' + type + '" type ' +
       'which does not exist.')
-    if (!Array.isArray(transforms[type]))
-      throw new TypeError('Transform value for "' + type + '" type ' +
+    if (!Array.isArray(hooks[type]))
+      throw new TypeError('Hook value for "' + type + '" type ' +
         'must be an array.')
   }
 
   // Validate record types.
   for (type in recordTypes) {
     validate(recordTypes[type])
-    if (!(type in transforms)) transforms[type] = []
+    if (!(type in hooks)) hooks[type] = []
   }
 
   /*!
@@ -2272,7 +2291,7 @@ Fortune.prototype.constructor = function (recordTypes, options) {
   adapter = new AdapterSingleton({
     adapter: options.adapter,
     recordTypes: recordTypes,
-    transforms: transforms
+    hooks: hooks
   })
 
   // Internal properties.
@@ -2282,7 +2301,7 @@ Fortune.prototype.constructor = function (recordTypes, options) {
 
     // Configuration settings.
     options: { value: options },
-    transforms: { value: transforms },
+    hooks: { value: hooks },
     recordTypes: { value: recordTypes, enumerable: true },
 
     // Singleton instances.
@@ -2300,9 +2319,7 @@ Fortune.prototype.constructor = function (recordTypes, options) {
  *
  * - `method`: The method is a either a function or a constant, which is keyed
  *   under `Fortune.methods` and may be one of `find`, `create`, `update`,  or
- *   `delete`. To implement a custom method, pass a function that accepts
- *   one argument, the context. It may return the context synchronously or
- *   as a Promise. Default: `find`.
+ *   `delete`. Default: `find`.
  *
  * - `type`: Name of a type. **Required**.
  *
@@ -2363,6 +2380,98 @@ Fortune.prototype.request = function (options) {
     })
 
   return dispatch(self, options)
+}
+
+
+/**
+ * The `find` method retrieves record by type given IDs, querying options,
+ * or both. It wraps around the `request` method, see the `request` method for
+ * documentation on its arguments.
+ *
+ * @param {String} type
+ * @param {*|*[]} [ids]
+ * @param {Object} [options]
+ * @param {Array[]} [include]
+ * @param {Object} [meta]
+ * @return {Promise}
+ */
+Fortune.prototype.find = function () {
+  var options = { method: methods.find, type: arguments[0] }
+
+  if (arguments[1] != null) options.ids = Array.isArray(arguments[1]) ?
+    arguments[1] : [ arguments[1] ]
+  if (arguments[2] != null) options.options = arguments[2]
+  if (arguments[3] != null) options.include = arguments[3]
+  if (arguments[4] != null) options.meta = arguments[4]
+
+  return this.request(options)
+}
+
+
+/**
+ * The `create` method creates records by type given records to create. It
+ * wraps around the `request` method, see the request `method` for
+ * documentation on its arguments.
+ *
+ * @param {String} type
+ * @param {Object|Object[]} records
+ * @param {Array[]} [include]
+ * @param {Object} [meta]
+ * @return {Promise}
+ */
+Fortune.prototype.create = function () {
+  var options = { method: methods.create, type: arguments[0],
+    payload: Array.isArray(arguments[1]) ? arguments[1] : [ arguments[1] ] }
+
+  if (arguments[2] != null) options.include = arguments[2]
+  if (arguments[3] != null) options.meta = arguments[3]
+
+  return this.request(options)
+}
+
+
+/**
+ * The `update` method updates records by type given update objects. It wraps
+ * around the `request` method, see the `request` method for documentation on
+ * its arguments.
+ *
+ * @param {String} type
+ * @param {Object|Object[]} updates
+ * @param {Array[]} [include]
+ * @param {Object} [meta]
+ * @return {Promise}
+ */
+Fortune.prototype.update = function () {
+  var options = { method: methods.update, type: arguments[0],
+    payload: Array.isArray(arguments[1]) ? arguments[1] : [ arguments[1] ] }
+
+  if (arguments[2] != null) options.include = arguments[2]
+  if (arguments[3] != null) options.meta = arguments[3]
+
+  return this.request(options)
+}
+
+
+/**
+ * The `delete` method deletes records by type given IDs (optional). It wraps
+ * around the `request` method, see the `request` method for documentation on
+ * its arguments.
+ *
+ * @param {String} type
+ * @param {*|*[]} [ids]
+ * @param {Array[]} [include]
+ * @param {Object} [meta]
+ * @return {Promise}
+ */
+Fortune.prototype.delete = function () {
+  var options = { method: methods.delete, type: arguments[0] }
+
+  if (arguments[1] != null) options.ids = Array.isArray(arguments[1]) ?
+    arguments[1] : [ arguments[1] ]
+  if (arguments[2] != null) options.include = arguments[2]
+  if (arguments[3] != null) options.meta = arguments[3]
+
+  return this.request(options)
 }
 
 
@@ -2451,7 +2560,7 @@ function bindMiddleware (scope, method) {
 
 module.exports = Fortune
 
-},{"./adapter":7,"./adapter/adapters/memory":6,"./adapter/singleton":8,"./common/assign":17,"./common/errors":21,"./common/events":22,"./common/message":24,"./common/methods":25,"./common/promise":26,"./dispatch":35,"./record_type/ensure_types":43,"./record_type/validate":44,"event-lite":49}],29:[function(require,module,exports){
+},{"./adapter":7,"./adapter/adapters/memory":6,"./adapter/singleton":8,"./common/assign":17,"./common/errors":21,"./common/events":22,"./common/message":24,"./common/methods":25,"./common/promise":26,"./dispatch":35,"./record_type/ensure_types":44,"./record_type/validate":45,"event-lite":50}],29:[function(require,module,exports){
 'use strict'
 
 var message = require('../common/message')
@@ -2574,10 +2683,10 @@ module.exports = function (context) {
   var Promise = promise.Promise
   var adapter = self.adapter
   var recordTypes = self.recordTypes
-  var transforms = self.transforms
+  var hooks = self.hooks
   var updates = {}
   var links = []
-  var transaction, records, type, meta, transform, fields, language
+  var transaction, records, type, meta, hook, fields, language
 
   // Start a promise chain.
   return Promise.resolve(context.request.payload)
@@ -2594,7 +2703,7 @@ module.exports = function (context) {
     meta = context.request.meta
     language = meta.language
 
-    transform = transforms[type]
+    hook = hooks[type]
     fields = recordTypes[type]
 
     for (field in fields) {
@@ -2613,26 +2722,26 @@ module.exports = function (context) {
   .then(function (result) {
     context.transaction = transaction = result
 
-    return typeof transform[0] === 'function' ?
+    return typeof hook[0] === 'function' ?
       Promise.all(map(records, function (record) {
-        return transform[0](context, record)
+        return hook[0](context, record)
       })) : records
   })
 
   .then(function (results) {
-    records = results
+    return Promise.all(map(results, function (record, i) {
+      if (record) records[i] = record
+      else record = records[i]
 
-    return Promise.all(map(records, function (record) {
       // Enforce the fields.
       enforce(type, record, fields, meta)
 
       // Ensure referential integrity.
       return checkLinks.call(self, record, fields, links, meta)
-      .then(function () { return record })
     }))
   })
 
-  .then(function (records) {
+  .then(function () {
     validateRecords.call(self, records, fields, links, meta)
     return transaction.create(type, records, meta)
   })
@@ -2645,16 +2754,16 @@ module.exports = function (context) {
     // Trying to batch updates to be as few as possible.
     var idCache = {}
 
+    // Adapter must return something.
+    if (!createdRecords.length)
+      throw new BadRequestError(message('CreateRecordsFail', language))
+
     records = createdRecords
 
     Object.defineProperty(context.response, 'records', {
       configurable: true,
       value: records
     })
-
-    // Adapter must return something.
-    if (!records.length)
-      throw new BadRequestError(message('CreateRecordsFail', language))
 
     // Iterate over each record to generate updates object.
     for (i = 0, j = records.length; i < j; i++) {
@@ -2726,7 +2835,7 @@ module.exports = function (context) {
   })
 }
 
-},{"../common/array/map":13,"../common/constants":19,"../common/errors":21,"../common/message":24,"../common/promise":26,"../record_type/enforce":42,"./check_links":29,"./update_helpers":37,"./validate_records":38}],31:[function(require,module,exports){
+},{"../common/array/map":13,"../common/constants":19,"../common/errors":21,"../common/message":24,"../common/promise":26,"../record_type/enforce":43,"./check_links":29,"./update_helpers":37,"./validate_records":38}],31:[function(require,module,exports){
 'use strict'
 
 var message = require('../common/message')
@@ -2765,10 +2874,10 @@ module.exports = function (context) {
   var language = meta.language
   var adapter = self.adapter
   var recordTypes = self.recordTypes
-  var transforms = self.transforms
+  var hooks = self.hooks
   var updates = {}
   var fields = recordTypes[type]
-  var transform = transforms[type]
+  var hook = hooks[type]
   var links = []
   var transaction, field, records
 
@@ -2796,9 +2905,9 @@ module.exports = function (context) {
   .then(function (result) {
     context.transaction = transaction = result
 
-    return typeof transform[0] === 'function' ?
+    return typeof hook[0] === 'function' ?
       Promise.all(map(records, function (record) {
-        return transform[0](context, record)
+        return hook[0](context, record)
       })) : records
   })
 
@@ -2895,17 +3004,17 @@ var promise = require('../common/promise')
 
 
 /**
- * Apply `output` transform per record, this mutates `context.response`.
+ * Apply `output` hook per record, this mutates `context.response`.
  *
  * @return {Promise}
  */
 module.exports = function (context) {
   var Promise = promise.Promise
-  var transforms = this.transforms
+  var hooks = this.hooks
   var request = context.request
   var response = context.response
   var type = request.type
-  var transform = transforms[type]
+  var hook = hooks[type]
   var records = response.records
   var include = response.include
 
@@ -2917,10 +3026,10 @@ module.exports = function (context) {
   // at this point.
   delete context.transaction
 
-  // Run transforms on primary type.
+  // Run hooks on primary type.
   return (records ? Promise.all(map(records, function (record) {
-    return Promise.resolve(typeof transform[1] === 'function' ?
-      transform[1](context, record) : record)
+    return Promise.resolve(typeof hook[1] === 'function' ?
+      hook[1](context, record) : record)
   }))
 
   .then(function (updatedRecords) {
@@ -2928,42 +3037,40 @@ module.exports = function (context) {
     var i, j
 
     for (i = 0, j = updatedRecords.length; i < j; i++)
-      records[i] = updatedRecords[i]
+      if (updatedRecords[i]) records[i] = updatedRecords[i]
 
     if (!include) return void 0
 
-    // The order of the keys and their corresponding indices matter. Since it
-    // is an associative array, we are not guaranteed any particular order,
-    // but the order that we get matters.
+    // The order of the keys and their corresponding indices matter.
     includeTypes = Object.keys(include)
 
-    // Run output transforms per include type.
+    // Run output hooks per include type.
     return Promise.all(map(includeTypes, function (includeType) {
       return Promise.all(map(include[includeType], function (record) {
         return Promise.resolve(
-          typeof transforms[includeType][1] === 'function' ?
-            transforms[includeType][1](context, record) : record)
+          typeof hooks[includeType][1] === 'function' ?
+            hooks[includeType][1](context, record) : record)
       }))
     }))
 
     .then(function (types) {
-      var include = {}
-      var i, j
+      var i, j, k, l
 
+      // Assign results of output hooks on includes.
       for (i = 0, j = types.length; i < j; i++)
-        include[includeTypes[i]] = types[i]
-
-      return include
+        for (k = 0, l = types[i].length; k < l; k++)
+          if (types[i][k]) include[includeTypes[i]][k] = types[i][k]
     })
   }) : Promise.resolve())
 
-  .then(function (include) {
+  .then(function () {
     context.response.payload = {
       records: records
     }
 
     if (include) context.response.payload.include = include
 
+    // Expose the "count" property so that it is serializable.
     if (records && 'count' in records)
       context.response.payload.count = records.count
 
@@ -3357,7 +3464,7 @@ var denormalizedInverseKey = constants.denormalizedInverse
 
 
 /**
- * Do updates. First, it must find the records to update, then run transforms
+ * Do updates. First, it must find the records to update, then run hooks
  * and validation, then apply the update as well as links on related records.
  *
  * @return {Promise}
@@ -3367,7 +3474,7 @@ module.exports = function (context) {
   var Promise = promise.Promise
   var adapter = self.adapter
   var recordTypes = self.recordTypes
-  var transforms = self.transforms
+  var hooks = self.hooks
 
   // Keyed by update, valued by record.
   var updateMap = new WeakMap()
@@ -3376,10 +3483,10 @@ module.exports = function (context) {
   var linkedMap = new WeakMap()
 
   var relatedUpdates = {}
-  var transformedUpdates = []
+  var hookedUpdates = []
 
   var links = []
-  var transaction, updates, fields, transform, type, meta, language
+  var transaction, updates, fields, hook, type, meta, language
 
   // Start a promise chain.
   return Promise.resolve(context.request.payload)
@@ -3395,7 +3502,7 @@ module.exports = function (context) {
     language = meta.language
 
     fields = recordTypes[type]
-    transform = transforms[type]
+    hook = hooks[type]
 
     // Delete denormalized inverse fields, can't be updated.
     for (field in fields) {
@@ -3423,7 +3530,7 @@ module.exports = function (context) {
   .then(function (records) {
     return Promise.all(map(records, function (record) {
       var update, cloneUpdate
-      var hasTransform = typeof transform[0] === 'function'
+      var hasHook = typeof hook[0] === 'function'
       var id = record[primaryKey]
 
       update = find(updates, function (update) {
@@ -3433,12 +3540,14 @@ module.exports = function (context) {
       if (!update) throw new NotFoundError(
         message('UpdateRecordMissing', language))
 
-      if (hasTransform) cloneUpdate = clone(update)
+      if (hasHook) cloneUpdate = clone(update)
 
-      return Promise.resolve(hasTransform ?
-        transform[0](context, record, update) : update)
-      .then(function (update) {
-        if (hasTransform) {
+      return Promise.resolve(hasHook ?
+        hook[0](context, record, update) : update)
+      .then(function (result) {
+        if (result) update = result
+
+        if (hasHook) {
           // Check if the update has been modified or not.
           if (!deepEqual(update, cloneUpdate))
             context.response.meta.updateModified = true
@@ -3448,7 +3557,7 @@ module.exports = function (context) {
             message('InvalidID', language))
         }
 
-        transformedUpdates.push(update)
+        hookedUpdates.push(update)
         updateMap.set(update, record)
 
         // Shallow clone the record.
@@ -3486,10 +3595,10 @@ module.exports = function (context) {
 
     // Drop fields in the updates that aren't defined in the record type
     // before doing the update.
-    for (i = 0, j = transformedUpdates.length; i < j; i++)
-      dropFields(transformedUpdates[i], fields)
+    for (i = 0, j = hookedUpdates.length; i < j; i++)
+      dropFields(hookedUpdates[i], fields)
 
-    return transaction.update(type, transformedUpdates, meta)
+    return transaction.update(type, hookedUpdates, meta)
   })
 
   .then(function () {
@@ -3501,8 +3610,8 @@ module.exports = function (context) {
     var idCache = {}
 
     // Iterate over each update to generate related updates.
-    for (i = 0, j = transformedUpdates.length; i < j; i++) {
-      update = transformedUpdates[i]
+    for (i = 0, j = hookedUpdates.length; i < j; i++) {
+      update = hookedUpdates[i]
 
       for (k = 0, l = links.length; k < l; k++) {
         field = links[k]
@@ -3669,7 +3778,7 @@ module.exports = function (context) {
     var eventData = {}, linkedType
 
     eventData[updateMethod] = {}
-    eventData[updateMethod][type] = transformedUpdates
+    eventData[updateMethod][type] = hookedUpdates
 
     for (linkedType in relatedUpdates) {
       if (!relatedUpdates[linkedType].length) continue
@@ -3721,7 +3830,7 @@ function dropFields (update, fields) {
     if (!(field in fields)) delete update.push[field]
 }
 
-},{"../common/apply_update":10,"../common/array/find":11,"../common/array/includes":12,"../common/array/map":13,"../common/assign":17,"../common/clone":18,"../common/constants":19,"../common/deep_equal":20,"../common/errors":21,"../common/message":24,"../common/promise":26,"../record_type/enforce":42,"./check_links":29,"./update_helpers":37,"./validate_records":38}],37:[function(require,module,exports){
+},{"../common/apply_update":10,"../common/array/find":11,"../common/array/includes":12,"../common/array/map":13,"../common/assign":17,"../common/clone":18,"../common/constants":19,"../common/deep_equal":20,"../common/errors":21,"../common/message":24,"../common/promise":26,"../record_type/enforce":43,"./check_links":29,"./update_helpers":37,"./validate_records":38}],37:[function(require,module,exports){
 'use strict'
 
 var find = require('../common/array/find')
@@ -3855,6 +3964,51 @@ window.fortune = require('./browser')
 },{"./browser":9}],40:[function(require,module,exports){
 'use strict'
 
+var core = require('../core')
+var wsRequest = require('./websocket_request')
+
+
+/**
+ * Given a W3C WebSocket client, return an object that contains Fortune
+ * instance methods `request`, `find`, `create`, `update`, `delete`, and a new
+ * method `state` for changing connection state. This is merely a convenience
+ * method that wraps around `fortune.net.request`. For example:
+ *
+ * ```js
+ * // https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
+ * var client = new WebSocket(url, protocols)
+ * var remote = fortune.net.client(client)
+ *
+ * // `remote` is an object containing Fortune instance methods, and the
+ * // `state` method.
+ * remote.request(...)
+ * remote.state(...)
+ * ```
+ *
+ * @param {WebSocket} client
+ * @return {Object}
+ */
+function client (client) {
+  // Using the closure here to refer to the client.
+  return {
+    request: function request (options) {
+      return wsRequest(client, options)
+    },
+    state: function state (state) {
+      return wsRequest(client, null, state)
+    },
+    find: core.prototype.find,
+    create: core.prototype.create,
+    update: core.prototype.update,
+    delete: core.prototype.delete
+  }
+}
+
+module.exports = client
+
+},{"../core":28,"./websocket_request":41}],41:[function(require,module,exports){
+'use strict'
+
 var msgpack = require('msgpack-lite')
 var promise = require('../common/promise')
 var common = require('../adapter/adapters/common')
@@ -3864,14 +4018,13 @@ var generateId = common.generateId
 /**
  * Given a W3C WebSocket client, send a request using the Fortune wire
  * protocol, and get a response back as a Promise. This will not create a
- * client, it needs to be created externally. For example:
+ * client, it needs to be created externally, and this method will
+ * automatically wait if it is not connected yet. For example:
  *
  * ```js
  * // https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
  * var client = new WebSocket(url, protocols)
- * client.addEventListener('open', function () {
- *   fortune.net.request(client, { ... })
- * })
+ * fortune.net.request(client, options)
  * ```
  *
  * The `options` object is exactly the same as that defined by
@@ -3887,43 +4040,57 @@ function request (client, options, state) {
   var Promise = promise.Promise
   var id = generateId()
   var data = { id: id }
+  var readyState = client.readyState
+  var rejectListener
 
   if (options && state) throw new Error('Must specify only options or state.')
   else if (options) data.request = options
   else if (state) data.state = state
   else throw new Error('Missing argument options or state.')
 
-  return new Promise(function (resolve, reject) {
-    client.binaryType = 'arraybuffer'
-    client.addEventListener('message', listener)
-    client.send(msgpack.encode(data))
+  if (readyState > 1)
+    throw new Error('WebSocket Client is closing or has been closed.')
 
-    function listener (event) {
-      var data
+  return (readyState === 0 ? new Promise(function (resolve, reject) {
+    rejectListener = reject
+    client.addEventListener('open', resolve, { once: true })
+    client.addEventListener('error', reject, { once: true })
+  }) : Promise.resolve())
+  .then(function () {
+    client.removeEventListener('error', rejectListener)
 
-      if ('decoded' in event) data = event.decoded
-      else try {
-        data = event.decoded = msgpack.decode(new Uint8Array(event.data))
+    return new Promise(function (resolve, reject) {
+      client.binaryType = 'arraybuffer'
+      client.addEventListener('message', listener)
+      client.send(msgpack.encode(data))
+
+      function listener (event) {
+        var data
+
+        if ('decoded' in event) data = event.decoded
+        else try {
+          data = event.decoded = msgpack.decode(new Uint8Array(event.data))
+        }
+        catch (error) {
+          return reject(error)
+        }
+
+        // Ignore other responses.
+        if (data.id !== id) return null
+
+        client.removeEventListener('message', listener)
+
+        return 'error' in data ?
+          reject(new Error(data.error || 'No error specified.')) :
+          resolve(data)
       }
-      catch (error) {
-        return reject(error)
-      }
-
-      // Ignore other responses.
-      if (data.id !== id) return null
-
-      client.removeEventListener('message', listener)
-
-      return 'error' in data ?
-        reject(new Error(data.error || 'No error specified.')) :
-        resolve(data)
-    }
+    })
   })
 }
 
 module.exports = request
 
-},{"../adapter/adapters/common":1,"../common/promise":26,"msgpack-lite":53}],41:[function(require,module,exports){
+},{"../adapter/adapters/common":1,"../common/promise":26,"msgpack-lite":54}],42:[function(require,module,exports){
 'use strict'
 
 var Fortune = require('../core')
@@ -3994,7 +4161,7 @@ function sync (client, instance, merge) {
 
 module.exports = sync
 
-},{"../common/constants":19,"../common/promise":26,"../core":28,"msgpack-lite":53}],42:[function(require,module,exports){
+},{"../common/constants":19,"../common/promise":26,"../core":28,"msgpack-lite":54}],43:[function(require,module,exports){
 (function (Buffer){
 'use strict'
 
@@ -4135,7 +4302,7 @@ function matchId (a) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"../common/array/find":11,"../common/errors":21,"../common/keys":23,"../common/message":24,"buffer":46}],43:[function(require,module,exports){
+},{"../common/array/find":11,"../common/errors":21,"../common/keys":23,"../common/message":24,"buffer":47}],44:[function(require,module,exports){
 'use strict'
 
 var keys = require('../common/keys')
@@ -4216,7 +4383,7 @@ module.exports = function ensureTypes (types) {
     }
 }
 
-},{"../common/keys":23}],44:[function(require,module,exports){
+},{"../common/keys":23}],45:[function(require,module,exports){
 (function (Buffer){
 'use strict'
 
@@ -4238,6 +4405,7 @@ var plainObject = {}
  * correct format.
  *
  * @param {Object} fields
+ * @return {Object}
  */
 module.exports = function validate (fields) {
   var key
@@ -4245,17 +4413,21 @@ module.exports = function validate (fields) {
   if (typeof fields !== 'object')
     throw new TypeError('Type definition must be an object.')
 
-  for (key in fields) validateField(fields[key], key)
+  for (key in fields) validateField(fields, key)
+
+  return fields
 }
 
 
 /**
  * Parse a field definition.
  *
- * @param {Object} value
+ * @param {Object} fields
  * @param {String} key
  */
-function validateField (value, key) {
+function validateField (fields, key) {
+  var value = fields[key] = castShorthand(fields[key])
+
   if (typeof value !== 'object' || value.constructor !== Object)
     throw new TypeError('The definition of "' + key + '" must be an object.')
 
@@ -4280,6 +4452,13 @@ function validateField (value, key) {
     }) && typeof value[typeKey] !== 'function')
       throw new Error('The "' + typeKey + '" on "' + key + '" is invalid.')
 
+    if (typeof value[typeKey] === 'function' &&
+      !find(nativeTypes, function (type) {
+        return type === value[typeKey].prototype.constructor
+      }))
+      throw new Error('The "' + typeKey + '" on "' + key + '" must inherit ' +
+        'from a valid native type.')
+
     if (value[inverseKey])
       throw new Error('The field "' + inverseKey + '" may not be defined ' +
         'on "' + key + '".')
@@ -4300,8 +4479,41 @@ function validateField (value, key) {
         'must be a boolean.')
 }
 
+
+/**
+ * Cast shorthand definition to standard definition.
+ *
+ * @param {*} value
+ * @return {Object}
+ */
+function castShorthand (value) {
+  var obj
+
+  if (typeof value === 'string') obj = { link: value }
+  else if (typeof value === 'function') obj = { type: value }
+  else if (Array.isArray(value)) {
+    obj = {}
+
+    if (value[1]) obj.inverse = value[1]
+    else obj.isArray = true
+
+    // Extract type or link.
+    if (Array.isArray(value[0])) {
+      obj.isArray = true
+      value = value[0][0]
+    }
+    else value = value[0]
+
+    if (typeof value === 'string') obj.link = value
+    else if (typeof value === 'function') obj.type = value
+  }
+  else return value
+
+  return obj
+}
+
 }).call(this,require("buffer").Buffer)
-},{"../common/array/find":11,"../common/keys":23,"buffer":46}],45:[function(require,module,exports){
+},{"../common/array/find":11,"../common/keys":23,"buffer":47}],46:[function(require,module,exports){
 'use strict'
 
 exports.toByteArray = toByteArray
@@ -4412,7 +4624,7 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],46:[function(require,module,exports){
+},{}],47:[function(require,module,exports){
 (function (global){
 /*!
  * The buffer module from node.js, for the browser.
@@ -6129,14 +6341,14 @@ function isnan (val) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"base64-js":45,"ieee754":50,"isarray":47}],47:[function(require,module,exports){
+},{"base64-js":46,"ieee754":51,"isarray":48}],48:[function(require,module,exports){
 var toString = {}.toString;
 
 module.exports = Array.isArray || function (arr) {
   return toString.call(arr) == '[object Array]';
 };
 
-},{}],48:[function(require,module,exports){
+},{}],49:[function(require,module,exports){
 'use strict'
 
 var hasCaptureStackTrace = 'captureStackTrace' in Error
@@ -6195,7 +6407,7 @@ function nonEnumerableProperty (value) {
   }
 }
 
-},{}],49:[function(require,module,exports){
+},{}],50:[function(require,module,exports){
 /**
  * event-lite.js - Light-weight EventEmitter (less than 1KB when gzipped)
  *
@@ -6377,7 +6589,7 @@ function EventLite() {
 
 })(EventLite);
 
-},{}],50:[function(require,module,exports){
+},{}],51:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = nBytes * 8 - mLen - 1
@@ -6463,7 +6675,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],51:[function(require,module,exports){
+},{}],52:[function(require,module,exports){
 (function (Buffer){
 // int64-buffer.js
 
@@ -6760,7 +6972,7 @@ var Uint64BE, Int64BE, Uint64LE, Int64LE;
 }(typeof exports === 'object' && typeof exports.nodeName !== 'string' ? exports : (this || {}));
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":46}],52:[function(require,module,exports){
+},{"buffer":47}],53:[function(require,module,exports){
 /**
  * Determine if an object is Buffer
  *
@@ -6779,7 +6991,7 @@ module.exports = function (obj) {
     ))
 }
 
-},{}],53:[function(require,module,exports){
+},{}],54:[function(require,module,exports){
 // browser.js
 
 exports.encode = require("./encode").encode;
@@ -6791,7 +7003,7 @@ exports.Decoder = require("./decoder").Decoder;
 exports.createCodec = require("./ext").createCodec;
 exports.codec = require("./codec").codec;
 
-},{"./codec":56,"./decode":58,"./decoder":59,"./encode":61,"./encoder":62,"./ext":65}],54:[function(require,module,exports){
+},{"./codec":57,"./decode":59,"./decoder":60,"./encode":62,"./encoder":63,"./ext":66}],55:[function(require,module,exports){
 // util.js
 
 var Int64Buffer = require("int64-buffer");
@@ -6899,7 +7111,7 @@ function writeInt64BE(value, offset) {
   new Int64BE(this, offset, value);
 }
 
-},{"int64-buffer":51}],55:[function(require,module,exports){
+},{"int64-buffer":52}],56:[function(require,module,exports){
 // buffer-shortage.js
 
 exports.BufferShortageError = BufferShortageError;
@@ -6909,14 +7121,14 @@ BufferShortageError.prototype = Error.prototype;
 function BufferShortageError() {
 }
 
-},{}],56:[function(require,module,exports){
+},{}],57:[function(require,module,exports){
 // codec.js
 
 exports.codec = {
   preset: require("./ext").createCodec({preset: true})
 };
 
-},{"./ext":65}],57:[function(require,module,exports){
+},{"./ext":66}],58:[function(require,module,exports){
 (function (Buffer){
 // decode-buffer.js
 
@@ -6991,7 +7203,7 @@ DecodeBuffer.prototype.flush = function() {
 };
 
 }).call(this,require("buffer").Buffer)
-},{"./buffer-shortage":55,"./codec":56,"buffer":46}],58:[function(require,module,exports){
+},{"./buffer-shortage":56,"./codec":57,"buffer":47}],59:[function(require,module,exports){
 // decode.js
 
 exports.decode = decode;
@@ -7003,7 +7215,7 @@ function decode(input, options) {
   decoder.write(input);
   return decoder.read();
 }
-},{"./decode-buffer":57}],59:[function(require,module,exports){
+},{"./decode-buffer":58}],60:[function(require,module,exports){
 // decoder.js
 
 exports.Decoder = Decoder;
@@ -7034,7 +7246,7 @@ Decoder.prototype.end = function(chunk) {
   this.emit("end");
 };
 
-},{"./decode-buffer":57,"event-lite":49}],60:[function(require,module,exports){
+},{"./decode-buffer":58,"event-lite":50}],61:[function(require,module,exports){
 (function (Buffer){
 // encode-buffer.js
 
@@ -7138,7 +7350,7 @@ EncodeBuffer.prototype.send = function(buffer) {
 };
 
 }).call(this,require("buffer").Buffer)
-},{"./codec":56,"buffer":46}],61:[function(require,module,exports){
+},{"./codec":57,"buffer":47}],62:[function(require,module,exports){
 // encode.js
 
 exports.encode = encode;
@@ -7151,7 +7363,7 @@ function encode(input, options) {
   return encoder.read();
 }
 
-},{"./encode-buffer":60}],62:[function(require,module,exports){
+},{"./encode-buffer":61}],63:[function(require,module,exports){
 // encoder.js
 
 exports.Encoder = Encoder;
@@ -7179,7 +7391,7 @@ Encoder.prototype.end = function(chunk) {
   this.emit("end");
 };
 
-},{"./encode-buffer":60,"event-lite":49}],63:[function(require,module,exports){
+},{"./encode-buffer":61,"event-lite":50}],64:[function(require,module,exports){
 // ext-buffer.js
 
 exports.ExtBuffer = ExtBuffer;
@@ -7190,7 +7402,7 @@ function ExtBuffer(buffer, type) {
   this.type = type;
 }
 
-},{}],64:[function(require,module,exports){
+},{}],65:[function(require,module,exports){
 (function (Buffer){
 // ext-preset.js
 
@@ -7382,7 +7594,7 @@ function unpackArrayBuffer(value) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"./decode":58,"./encode":61,"buffer":46}],65:[function(require,module,exports){
+},{"./decode":59,"./encode":62,"buffer":47}],66:[function(require,module,exports){
 // ext.js
 
 var IS_ARRAY = require("isarray");
@@ -7464,7 +7676,7 @@ function join(filters) {
   }
 }
 
-},{"./ext-buffer":63,"./ext-preset":64,"./read-core":66,"./write-core":69,"isarray":73}],66:[function(require,module,exports){
+},{"./ext-buffer":64,"./ext-preset":65,"./read-core":67,"./write-core":70,"isarray":74}],67:[function(require,module,exports){
 // read-core.js
 
 exports.getDecoder = getDecoder;
@@ -7484,7 +7696,7 @@ function getDecoder(options) {
   }
 }
 
-},{"./read-format":67,"./read-token":68}],67:[function(require,module,exports){
+},{"./read-format":68,"./read-token":69}],68:[function(require,module,exports){
 (function (Buffer){
 // read-format.js
 
@@ -7642,7 +7854,7 @@ function slice(start, end) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"./buffer-lite":54,"./buffer-shortage":55,"buffer":46,"ieee754":50,"int64-buffer":51}],68:[function(require,module,exports){
+},{"./buffer-lite":55,"./buffer-shortage":56,"buffer":47,"ieee754":51,"int64-buffer":52}],69:[function(require,module,exports){
 // read-token.js
 
 var ReadFormat = require("./read-format");
@@ -7805,7 +8017,7 @@ function fix(len, method) {
   };
 }
 
-},{"./read-format":67}],69:[function(require,module,exports){
+},{"./read-format":68}],70:[function(require,module,exports){
 // write-core.js
 
 exports.getEncoder = getEncoder;
@@ -7823,7 +8035,7 @@ function getEncoder(options) {
   }
 }
 
-},{"./write-type":71}],70:[function(require,module,exports){
+},{"./write-type":72}],71:[function(require,module,exports){
 (function (Buffer){
 // write-token.js
 
@@ -8026,7 +8238,7 @@ function writeN(type, len, method, noAssert) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"./buffer-lite":54,"./write-uint8":72,"buffer":46}],71:[function(require,module,exports){
+},{"./buffer-lite":55,"./write-uint8":73,"buffer":47}],72:[function(require,module,exports){
 (function (Buffer){
 // write-type.js
 
@@ -8291,7 +8503,7 @@ function move(encoder, start, length, diff) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"./buffer-lite":54,"./ext-buffer":63,"./write-token":70,"./write-uint8":72,"buffer":46,"int64-buffer":51,"isarray":73}],72:[function(require,module,exports){
+},{"./buffer-lite":55,"./ext-buffer":64,"./write-token":71,"./write-uint8":73,"buffer":47,"int64-buffer":52,"isarray":74}],73:[function(require,module,exports){
 // write-unit8.js
 
 var constant = exports.uint8 = new Array(256);
@@ -8307,6 +8519,6 @@ function write0(type) {
   };
 }
 
-},{}],73:[function(require,module,exports){
-arguments[4][47][0].apply(exports,arguments)
-},{"dup":47}]},{},[39]);
+},{}],74:[function(require,module,exports){
+arguments[4][48][0].apply(exports,arguments)
+},{"dup":48}]},{},[39]);
