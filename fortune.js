@@ -1,6 +1,6 @@
 /*!
  * Fortune.js
- * Version 4.2.0
+ * Version 4.2.3
  * MIT License
  * http://fortune.js.org
  */
@@ -30,15 +30,14 @@ var matchCheck = [
 // For comparing sort order.
 var comparisons = [
   [ Number, function (a, b) { return a - b } ],
-  [ String, function (a, b) { return a < b ? -1 : a > b ? 1 : 0 } ],
+  [ String, function (a, b) { return a === b ? 0 : a > b ? 1 : -1 } ],
   [ Boolean, function (a, b) { return a === b ? 0 : a ? 1 : -1 } ],
   [ Date, function (a, b) { return a.getTime() - b.getTime() } ],
   [ Buffer, Buffer.compare ],
 
-  // There is no comparison here that makes sense.
-  [ Object, function (a, b) {
-    return Object.keys(a).length - Object.keys(b).length
-  } ]
+  // There is no comparison here that makes sense, so this should simply be a
+  // no-op by default.
+  [ Object, function () { return 0 } ]
 ]
 
 
