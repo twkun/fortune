@@ -1,6 +1,6 @@
 /*!
  * Fortune.js
- * Version 4.2.4
+ * Version 4.2.5
  * MIT License
  * http://fortune.js.org
  */
@@ -1892,7 +1892,7 @@ message.en = {
   'InvalidMethod': 'The method "{method}" is unrecognized.',
   'CollisionToOne': 'Multiple records can not have the same to-one link value on the field "{field}".',
   'CollisionDuplicate': 'Duplicate ID "{id}" in the field "{field}".',
-  'UpdateRecordMissing': 'The record to be updated could not be found.',
+  'UpdateRecordMissing': 'A record to be updated could not be found.',
   'UpdateRecordsInvalid': 'There are no valid updates.',
   'UpdateRecordMissingID': 'An ID on an update is missing.',
   'EnforceArrayType': 'The value of "{key}" is invalid, it must be an array with values of type "{type}".',
@@ -3538,6 +3538,9 @@ module.exports = function (context) {
   })
 
   .then(function (records) {
+    if (records.length < updates.length)
+      throw new NotFoundError(message('UpdateRecordMissing', language))
+
     return Promise.all(map(records, function (record) {
       var update, cloneUpdate
       var hasHook = typeof hook[0] === 'function'
