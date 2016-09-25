@@ -1,6 +1,6 @@
 /*!
  * Fortune.js
- * Version 4.2.5
+ * Version 4.2.6
  * MIT License
  * http://fortune.js.org
  */
@@ -1886,7 +1886,9 @@ message.en = {
   'CreateRecordsInvalid': 'There are no valid records to be created.',
   'CreateRecordsFail': 'Records could not be created.',
   'CreateRecordMissingID': 'An ID on a created record is missing.',
-  'DeleteRecordsInvalid': 'There are no records to be deleted.',
+  'DeleteRecordsMissingID': 'IDs are required for deleting records.',
+  'DeleteRecordsInvalid': 'A record to be deleted could not be found.',
+  'DeleteRecordsFail': 'Not all records specified could be deleted.',
   'UnspecifiedType': 'The type is unspecified.',
   'InvalidType': 'The requested type "{type}" is not a valid type.',
   'InvalidMethod': 'The method "{method}" is unrecognized.',
@@ -2894,20 +2896,21 @@ module.exports = function (context) {
   for (field in fields)
     if (linkKey in fields[field]) links.push(field)
 
-  return (ids ? adapter.find(type, ids, null, meta) : Promise.resolve())
+  if (!ids || !ids.length)
+    throw new NotFoundError(message('DeleteRecordsMissingID', language))
+
+  return adapter.find(type, ids, null, meta)
 
   .then(function (foundRecords) {
     records = foundRecords
 
-    if (ids) {
-      if (!records.length)
-        throw new NotFoundError(message('DeleteRecordsInvalid', language))
+    if (records.length < ids.length)
+      throw new NotFoundError(message('DeleteRecordsInvalid', language))
 
-      Object.defineProperty(context.response, 'records', {
-        configurable: true,
-        value: records
-      })
-    }
+    Object.defineProperty(context.response, 'records', {
+      configurable: true,
+      value: records
+    })
 
     return adapter.beginTransaction()
   })
@@ -2932,15 +2935,9 @@ module.exports = function (context) {
     // Remove all instances of the deleted IDs in all records.
     var idCache = {}
 
-    // If IDs were not specified, show the count of records deleted.
-    if (!ids) {
-      records = []
-      records.count = count
-      Object.defineProperty(context.response, 'records', {
-        configurable: true,
-        value: records
-      })
-    }
+    // Sanity check.
+    if (count < ids.length)
+      throw new Error(message('DeleteRecordsFail', language))
 
     // Loop over each record to generate updates object.
     for (i = 0, j = records.length; i < j; i++) {
