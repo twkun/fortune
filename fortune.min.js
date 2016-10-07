@@ -1,6 +1,6 @@
 /*!
  * Fortune.js
- * Version 4.2.7
+ * Version 4.2.8
  * MIT License
  * http://fortune.js.org
  */
