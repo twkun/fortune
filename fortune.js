@@ -1,6 +1,6 @@
 /*!
  * Fortune.js
- * Version 4.2.8
+ * Version 4.2.9
  * MIT License
  * http://fortune.js.org
  */
@@ -90,8 +90,8 @@ exports.applyOptions = function (fields, records, options, meta) {
       record = records[i]
       for (field in record) {
         if (field === primaryKey) continue
-        if ((isInclude && !(field in options.fields)) ||
-          (isExclude && field in options.fields))
+        if ((isInclude && !(options.fields.hasOwnProperty(field))) ||
+          (isExclude && options.fields.hasOwnProperty(field)))
           delete record[field]
       }
     }
@@ -285,7 +285,7 @@ exports.inputRecord = function (type, record) {
     field = fieldsArray[i]
     fieldIsArray = fields[field][isArrayKey]
 
-    if (!(field in record)) {
+    if (!record.hasOwnProperty(field)) {
       result[field] = fieldIsArray ? [] : null
       continue
     }
@@ -313,7 +313,8 @@ exports.outputRecord = function (type, record) {
   for (i = 0, j = fieldsArray.length; i < j; i++) {
     field = fieldsArray[i]
     fieldIsArray = fields[field][isArrayKey]
-    value = field in record ? record[field] : fieldIsArray ? [] : null
+    value = record.hasOwnProperty(field) ?
+      record[field] : fieldIsArray ? [] : null
     fieldIsDenormalized = fields[field][denormalizedInverseKey]
 
     // Do not enumerate denormalized fields.
@@ -362,6 +363,9 @@ module.exports = function (Adapter) {
   function IndexedDBAdapter (properties) {
     MemoryAdapter.call(this, properties)
     if (!this.options.name) this.options.name = 'fortune'
+
+    // No LRU for IndexedDB, allow as many records as possible.
+    delete this.options.recordsPerType
   }
 
   IndexedDBAdapter.prototype = Object.create(MemoryAdapter.prototype)
@@ -393,7 +397,8 @@ module.exports = function (Adapter) {
           }
           catch (error) {
             return reject(new Error('IndexedDB capabilities detected, but a ' +
-              'connection could not be opened due to browser security.'))
+              'connection could not be opened. This is most likely due to ' +
+              'browser security settings.'))
           }
         else return reject(new Error('IndexedDB pre-requisites not met.'))
 
@@ -475,13 +480,19 @@ module.exports = function (Adapter) {
   }
 
 
-  IndexedDBAdapter.prototype.create = function (type, records) {
+  IndexedDBAdapter.prototype.create = function (type, records, meta) {
     var self = this
+    var collection = self.db[type]
+    var ConflictError = self.errors.ConflictError
+    var message = self.message
     var Promise = self.Promise
+    var language
 
-    return MemoryAdapter.prototype.create.call(self, type, records)
-    .then(function (records) {
-      return records.length ? new Promise(function (resolve, reject) {
+    if (!meta) meta = {}
+    language = meta.language
+
+    return Promise.resolve(records.length ?
+      new Promise(function (resolve, reject) {
         var id = generateId()
         var transfer = []
 
@@ -490,8 +501,14 @@ module.exports = function (Adapter) {
           id: id, method: 'create', type: type,
           records: reduce(records, function (hash, record) {
             var data = msgpack.encode(inputRecord.call(self, type, record))
+            var id = record[primaryKey]
+
+            if (collection.hasOwnProperty(id))
+              throw new ConflictError(
+                message('RecordExists', language, { id: id }))
+
             transfer.push(data.buffer)
-            hash[record[primaryKey]] = data
+            hash[id] = data
             return hash
           }, {})
         }, transfer)
@@ -505,7 +522,9 @@ module.exports = function (Adapter) {
           self.worker.removeEventListener('message', listener)
           return resolve(records)
         }
-      }) : records
+      }) : records)
+    .then(function (records) {
+      return MemoryAdapter.prototype.create.call(self, type, records)
     })
   }
 
@@ -521,9 +540,8 @@ module.exports = function (Adapter) {
     var db = self.db
     var id = generateId()
 
-    return MemoryAdapter.prototype.update.call(self, type, updates)
-    .then(function (count) {
-      return count ? new Promise(function (resolve, reject) {
+    return Promise.resolve(updates.length ?
+      new Promise(function (resolve, reject) {
         var i, j, record, records = [], transfer = []
 
         for (i = 0, j = updates.length; i < j; i++) {
@@ -531,6 +549,8 @@ module.exports = function (Adapter) {
           if (!record) continue
           records.push(record)
         }
+
+        if (!records.length) return resolve()
 
         self.worker.addEventListener('message', listener)
         self.worker.postMessage({
@@ -543,6 +563,8 @@ module.exports = function (Adapter) {
           }, {})
         }, transfer)
 
+        return null
+
         function listener (event) {
           var data = event.data
 
@@ -551,9 +573,11 @@ module.exports = function (Adapter) {
 
           self.worker.removeEventListener('message', listener)
 
-          return resolve(count)
+          return resolve()
         }
-      }) : count
+      }) : null)
+    .then(function () {
+      return MemoryAdapter.prototype.update.call(self, type, updates)
     })
   }
 
@@ -563,9 +587,8 @@ module.exports = function (Adapter) {
     var Promise = self.Promise
     var id = generateId()
 
-    return MemoryAdapter.prototype.delete.call(self, type, ids)
-    .then(function (count) {
-      return count ? new Promise(function (resolve, reject) {
+    return Promise.resolve(!ids || ids.length ?
+      new Promise(function (resolve, reject) {
         self.worker.addEventListener('message', listener)
         self.worker.postMessage({
           id: id, method: ids ? 'delete' : 'deleteAll',
@@ -580,9 +603,11 @@ module.exports = function (Adapter) {
 
           self.worker.removeEventListener('message', listener)
 
-          return resolve(count)
+          return resolve()
         }
-      }) : count
+      }) : null)
+    .then(function () {
+      return MemoryAdapter.prototype.delete.call(self, type, ids)
     })
   }
 
@@ -616,7 +641,7 @@ function worker () {
     methodMap[method](data, function (error, result, transfer) {
       if (error) {
         self.postMessage({
-          id: id, error: error.toString()
+          id: id, error: '' + error
         })
         return
       }
@@ -849,7 +874,7 @@ exports.inputRecord = function (type, record) {
 
   for (i = 0, j = fieldsArray.length; i < j; i++) {
     field = fieldsArray[i]
-    if (!(field in record)) {
+    if (!record.hasOwnProperty(field)) {
       result[field] = fields[field][isArrayKey] ? [] : null
       continue
     }
@@ -869,14 +894,15 @@ exports.outputRecord = function (type, record) {
   var fields = recordTypes[type]
   var fieldsArray = Object.getOwnPropertyNames(fields)
   var result = {}
-  var i, j, field, value
+  var i, j, field, hasField, value
 
   // ID business.
   result[primaryKey] = record[primaryKey]
 
   for (i = 0, j = fieldsArray.length; i < j; i++) {
     field = fieldsArray[i]
-    value = field in record ? record[field] :
+    hasField = record.hasOwnProperty(field)
+    value = hasField ? record[field] :
       fields[field][isArrayKey] ? [] : null
 
     // Do not enumerate denormalized fields.
@@ -887,7 +913,7 @@ exports.outputRecord = function (type, record) {
       continue
     }
 
-    if (field in record) result[field] = value
+    if (hasField) result[field] = value
   }
 
   return result
@@ -944,10 +970,9 @@ module.exports = function (Adapter) {
   MemoryAdapter.prototype.find = function (type, ids, options, meta) {
     var self = this
     var Promise = self.Promise
-    var db = self.db
     var recordTypes = self.recordTypes
     var fields = recordTypes[type]
-    var collection = db[type]
+    var collection = self.db[type]
     var records = []
     var i, j, id, record
 
@@ -955,7 +980,7 @@ module.exports = function (Adapter) {
 
     if (ids) for (i = 0, j = ids.length; i < j; i++) {
       id = ids[i]
-      if (id in collection) {
+      if (collection.hasOwnProperty(id)) {
         record = collection[id]
 
         // LRU update.
@@ -977,11 +1002,10 @@ module.exports = function (Adapter) {
     var self = this
     var message = self.message
     var Promise = self.Promise
-    var db = self.db
     var recordsPerType = self.options.recordsPerType
     var primaryKey = self.keys.primary
     var ConflictError = self.errors.ConflictError
-    var collection = db[type]
+    var collection = self.db[type]
     var i, j, record, id, ids, language
 
     if (!meta) meta = {}
@@ -996,7 +1020,7 @@ module.exports = function (Adapter) {
       record = records[i]
       id = record[primaryKey]
 
-      if (collection[id])
+      if (collection.hasOwnProperty(id))
         return Promise.reject(new ConflictError(
           message('RecordExists', language, { id: id })))
     }
@@ -1028,9 +1052,8 @@ module.exports = function (Adapter) {
   MemoryAdapter.prototype.update = function (type, updates) {
     var self = this
     var Promise = self.Promise
-    var db = self.db
     var primaryKey = self.keys.primary
-    var collection = db[type]
+    var collection = self.db[type]
     var count = 0
     var i, j, update, id, record
 
@@ -1060,8 +1083,7 @@ module.exports = function (Adapter) {
 
   MemoryAdapter.prototype.delete = function (type, ids) {
     var Promise = this.Promise
-    var db = this.db
-    var collection = db[type]
+    var collection = this.db[type]
     var count = 0
     var i, j, id
 
@@ -1588,7 +1610,7 @@ module.exports = function pull (array, values) {
   // Need to iterate backwards.
   for (i = array.length; i--;) {
     value = array[i]
-    if (!(value in hash)) clone.push(value)
+    if (!hash.hasOwnProperty(value)) clone.push(value)
   }
 
   return clone
@@ -1631,7 +1653,7 @@ module.exports = function unique (a) {
 
   for (i = 0, j = a.length; i < j; i++) {
     k = a[i]
-    if (k in seen) continue
+    if (seen.hasOwnProperty(k)) continue
     result.push(k)
     seen[k] = true
   }
@@ -1846,10 +1868,10 @@ module.exports = message
 function message (id, language, data) {
   var str, key
 
-  if (!language || !(language in message))
+  if (!language || !message.hasOwnProperty(language))
     language = message.defaultLanguage
 
-  if (!(id in message[language]))
+  if (!message[language].hasOwnProperty(id))
     return message[language][genericMessage] || message.en[genericMessage]
 
   str = message[language][id]
@@ -2021,6 +2043,8 @@ var errors = require('./common/errors')
 var methods = require('./common/methods')
 var events = require('./common/events')
 var message = require('./common/message')
+
+var plainObject = {}
 
 
 /**
@@ -2280,7 +2304,7 @@ Fortune.prototype.constructor = function (recordTypes, options) {
 
   // Validate hooks.
   for (type in hooks) {
-    if (!(type in recordTypes)) throw new Error(
+    if (!recordTypes.hasOwnProperty(type)) throw new Error(
       'Attempted to define hook on "' + type + '" type ' +
       'which does not exist.')
     if (!Array.isArray(hooks[type]))
@@ -2290,8 +2314,12 @@ Fortune.prototype.constructor = function (recordTypes, options) {
 
   // Validate record types.
   for (type in recordTypes) {
+    if (type in plainObject)
+      throw new Error('Can not define type name "' + type +
+        '" which is in Object.prototype.')
+
     validate(recordTypes[type])
-    if (!(type in hooks)) hooks[type] = []
+    if (!hooks.hasOwnProperty(type)) hooks[type] = []
   }
 
   /*!
@@ -2608,7 +2636,8 @@ module.exports = function checkLinks (record, fields, links, meta) {
 
   return Promise.all(map(links, function (field) {
     var ids = Array.isArray(record[field]) ? record[field] :
-      !(field in record) || record[field] === null ? [] : [ record[field] ]
+      !record.hasOwnProperty(field) || record[field] === null ?
+      [] : [ record[field] ]
     var fieldLink = fields[field][linkKey]
     var fieldInverse = fields[field][inverseKey]
     var findOptions = { fields: {} }
@@ -2789,7 +2818,7 @@ module.exports = function (context) {
         field = links[k]
         inverseField = fields[field][inverseKey]
 
-        if (!(field in record) || !inverseField) continue
+        if (!record.hasOwnProperty(field) || !inverseField) continue
 
         linkedType = fields[field][linkKey]
         linkedIsArray =
@@ -2946,7 +2975,7 @@ module.exports = function (context) {
         field = links[k]
         inverseField = fields[field][inverseKey]
 
-        if (!(field in record) || !inverseField) continue
+        if (!record.hasOwnProperty(field) || !inverseField) continue
 
         linkedType = fields[field][linkKey]
         linkedIsArray = recordTypes[linkedType][inverseField][isArrayKey]
@@ -3184,7 +3213,7 @@ module.exports = function include (context) {
       return Promise.all(map(records, function (record) {
         var options
 
-        if (!(fields[0] in record)) {
+        if (!record.hasOwnProperty(fields[0])) {
           options = { fields: {} }
           options.fields[fields[0]] = true
 
@@ -3357,7 +3386,7 @@ function dispatch (scope, options) {
     }
 
     // If a type is specified and it doesn't exist, block the request.
-    if (!(type in recordTypes))
+    if (!recordTypes.hasOwnProperty(type))
       throw new NotFoundError(
         message('InvalidType', language, { type: type }))
 
@@ -3642,7 +3671,7 @@ module.exports = function (context) {
         linked = linkedMap.get(update)
 
         // Replacing a link field is pretty complicated.
-        if (update.replace && field in update.replace) {
+        if (update.replace && update.replace.hasOwnProperty(field)) {
           id = update.replace[field]
 
           if (!Array.isArray(id)) {
@@ -3657,7 +3686,7 @@ module.exports = function (context) {
                 inverseField, linkedIsArray)
 
             // Unset 2nd degree related record.
-            if (field in linked &&
+            if (linked.hasOwnProperty(field) &&
               linked[field][inverseField] !== null &&
               !linkedIsArray &&
               linked[field][inverseField] !== update[primaryKey])
@@ -3687,7 +3716,7 @@ module.exports = function (context) {
             id = record[field][m]
             if (!includes(ids, id)) {
               if (!('pull' in update)) update.pull = {}
-              if (field in update.pull) {
+              if (update.pull.hasOwnProperty(field)) {
                 if (Array.isArray(update.pull[field])) {
                   update.pull[field].push(id)
                   continue
@@ -3704,7 +3733,7 @@ module.exports = function (context) {
             id = ids[m]
             if (!includes(record[field], id)) {
               if (!('push' in update)) update.push = {}
-              if (field in update.push) {
+              if (update.push.hasOwnProperty(field)) {
                 if (Array.isArray(update.push[field])) {
                   update.push[field].push(id)
                   continue
@@ -3747,7 +3776,7 @@ module.exports = function (context) {
         }
 
         // Unset from 2nd degree related records.
-        if (field in linked && !linkedIsArray) {
+        if (linked.hasOwnProperty(field) && !linkedIsArray) {
           partialRecords = Array.isArray(linked[field]) ?
             linked[field] : [ linked[field] ]
 
@@ -3831,13 +3860,13 @@ function dropFields (update, fields) {
   var field
 
   for (field in update.replace)
-    if (!(field in fields)) delete update.replace[field]
+    if (!fields.hasOwnProperty(field)) delete update.replace[field]
 
   for (field in update.pull)
-    if (!(field in fields)) delete update.pull[field]
+    if (!fields.hasOwnProperty(field)) delete update.pull[field]
 
   for (field in update.push)
-    if (!(field in fields)) delete update.push[field]
+    if (!fields.hasOwnProperty(field)) delete update.push[field]
 }
 
 },{"../common/apply_update":10,"../common/array/find":11,"../common/array/includes":12,"../common/array/map":13,"../common/assign":17,"../common/clone":19,"../common/constants":20,"../common/deep_equal":21,"../common/errors":22,"../common/message":25,"../common/promise":27,"../record_type/enforce":44,"./check_links":30,"./update_helpers":38,"./validate_records":39}],38:[function(require,module,exports){
@@ -3941,7 +3970,7 @@ module.exports = function validateRecords (records, fields, links, meta) {
 
         for (m = 0, n = ids.length; m < n; m++) {
           id = ids[m]
-          if (id in seen) throw new ConflictError(
+          if (seen.hasOwnProperty(id)) throw new ConflictError(
             message('CollisionDuplicate', language, { id: id, field: field }))
           else seen[id] = true
         }
@@ -3957,7 +3986,7 @@ module.exports = function validateRecords (records, fields, links, meta) {
 
         for (m = 0, n = ids.length; m < n; m++) {
           id = ids[m]
-          if (!(id in toOneMap[field])) toOneMap[field][id] = true
+          if (!toOneMap[field].hasOwnProperty(id)) toOneMap[field][id] = true
           else throw new ConflictError(
             message('CollisionToOne', language, { field: field }))
         }
@@ -4344,7 +4373,7 @@ module.exports = function ensureTypes (types) {
 
       if (!(linkKey in definition)) continue
 
-      if (!(definition[linkKey] in types))
+      if (!types.hasOwnProperty(definition[linkKey]))
         throw new Error('The value for "' + linkKey + '" on "' + field +
           '" in type "' + type +
           '" is invalid, the record type does not exist.')
@@ -4352,7 +4381,7 @@ module.exports = function ensureTypes (types) {
       linkedFields = types[definition[linkKey]]
 
       if (inverseKey in definition) {
-        if (!(definition[inverseKey] in linkedFields))
+        if (!linkedFields.hasOwnProperty(definition[inverseKey]))
           throw new Error('The value for "' + inverseKey + '" on "' + field +
             '" in type "' + type + '" is invalid, the field does not exist.')
 
@@ -4445,7 +4474,7 @@ function validateField (fields, key) {
     throw new Error('Can not define primary key "' + primaryKey + '".')
 
   if (key in plainObject)
-    throw new Error('Can not define "' + key +
+    throw new Error('Can not define field name "' + key +
       '" which is in Object.prototype.')
 
   if (!value[typeKey] && !value[linkKey])
