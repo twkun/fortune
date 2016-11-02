@@ -1,6 +1,6 @@
 /*!
  * Fortune.js
- * Version 4.2.9
+ * Version 5.0.0
  * MIT License
  * http://fortune.js.org
  */
@@ -11,6 +11,7 @@
 var deepEqual = require('../../common/deep_equal')
 var message = require('../../common/message')
 var find = require('../../common/array/find')
+var generateId = require('../../common/generate_id')
 
 var errors = require('../../common/errors')
 var BadRequestError = errors.BadRequestError
@@ -42,11 +43,7 @@ var comparisons = [
 
 
 // Browser-safe ID generation.
-exports.generateId = function () {
-  return Date.now() + '-' +
-    ('00000000' + Math.floor(Math.random() * Math.pow(2, 32)).toString(16))
-    .slice(-8)
-}
+exports.generateId = generateId
 
 
 exports.applyOptions = function (fields, records, options, meta) {
@@ -247,612 +244,7 @@ function compare (fields, sort) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"../../common/array/find":11,"../../common/deep_equal":21,"../../common/errors":22,"../../common/keys":24,"../../common/message":25,"buffer":48}],2:[function(require,module,exports){
-'use strict'
-
-var castToNumber = require('../../../common/cast_to_number')
-var common = require('../common')
-var generateId = common.generateId
-
-// This is for ensuring that type/ID combination is unique.
-// https://stackoverflow.com/questions/26019147
-var delimiter = '__'
-
-
-// Unfortunately, IndexedDB implementations are pretty buggy. This adapter
-// tries to work around the incomplete and buggy implementations of IE10+ and
-// iOS 8+.
-// http://www.raymondcamden.com/2014/09/25/IndexedDB-on-iOS-8-Broken-Bad
-
-
-exports.delimiter = delimiter
-
-
-exports.inputRecord = function (type, record) {
-  var recordTypes = this.recordTypes
-  var primaryKey = this.keys.primary
-  var isArrayKey = this.keys.isArray
-  var fields = recordTypes[type]
-  var fieldsArray = Object.getOwnPropertyNames(fields)
-  var result = {}
-  var i, j, field, fieldIsArray
-
-  // ID business.
-  result[primaryKey] = type + delimiter + (primaryKey in record ?
-    record[primaryKey] : generateId())
-
-  for (i = 0, j = fieldsArray.length; i < j; i++) {
-    field = fieldsArray[i]
-    fieldIsArray = fields[field][isArrayKey]
-
-    if (!record.hasOwnProperty(field)) {
-      result[field] = fieldIsArray ? [] : null
-      continue
-    }
-
-    result[field] = record[field]
-  }
-
-  return result
-}
-
-
-exports.outputRecord = function (type, record) {
-  var recordTypes = this.recordTypes
-  var primaryKey = this.keys.primary
-  var isArrayKey = this.keys.isArray
-  var denormalizedInverseKey = this.keys.denormalizedInverse
-  var fields = recordTypes[type]
-  var fieldsArray = Object.getOwnPropertyNames(fields)
-  var result = {}
-  var i, j, field, fieldIsArray, fieldIsDenormalized, value
-
-  // ID business.
-  result[primaryKey] = castToNumber(record[primaryKey].split(delimiter)[1])
-
-  for (i = 0, j = fieldsArray.length; i < j; i++) {
-    field = fieldsArray[i]
-    fieldIsArray = fields[field][isArrayKey]
-    value = record.hasOwnProperty(field) ?
-      record[field] : fieldIsArray ? [] : null
-    fieldIsDenormalized = fields[field][denormalizedInverseKey]
-
-    // Do not enumerate denormalized fields.
-    if (fieldIsDenormalized) {
-      Object.defineProperty(result, field, {
-        configurable: true, writable: true, value: value
-      })
-      continue
-    }
-
-    if (field in record) result[field] = value
-  }
-
-  return result
-}
-
-},{"../../../common/cast_to_number":18,"../common":1}],3:[function(require,module,exports){
-'use strict'
-
-var msgpack = require('msgpack-lite')
-var reduce = require('../../../common/array/reduce')
-var assign = require('../../../common/assign')
-var memoryAdapter = require('../memory')
-
-var common = require('../common')
-var generateId = common.generateId
-
-var constants = require('../../../common/constants')
-var primaryKey = constants.primary
-
-var worker = require('./worker')
-var helpers = require('./helpers')
-var inputRecord = helpers.inputRecord
-var outputRecord = helpers.outputRecord
-var delimiter = helpers.delimiter
-
-
-/**
- * IndexedDB adapter. Available options:
- *
- * - `name`: Name of the database to connect to. Default: `fortune`.
- */
-module.exports = function (Adapter) {
-  var MemoryAdapter = memoryAdapter(Adapter)
-
-  function IndexedDBAdapter (properties) {
-    MemoryAdapter.call(this, properties)
-    if (!this.options.name) this.options.name = 'fortune'
-
-    // No LRU for IndexedDB, allow as many records as possible.
-    delete this.options.recordsPerType
-  }
-
-  IndexedDBAdapter.prototype = Object.create(MemoryAdapter.prototype)
-
-
-  IndexedDBAdapter.prototype.connect = function () {
-    var self = this
-    var Promise = self.Promise
-    var typesArray = Object.keys(self.recordTypes)
-    var name = self.options.name
-    var id = generateId()
-
-    return MemoryAdapter.prototype.connect.call(self)
-    .then(function () {
-      return new Promise(function (resolve, reject) {
-        var hasIndexedDB = 'indexedDB' in window
-        var hasWebWorker = 'Worker' in window
-        var hasBlob = 'Blob' in window
-        var hasCreateObjectURL = 'URL' in window && 'createObjectURL' in URL
-        var blob, objectURL, worker
-
-        if (hasIndexedDB && hasWebWorker && hasBlob && hasCreateObjectURL)
-          // Now that we're in here, need to check for private browsing modes.
-          try {
-            // This will fail synchronously if it's not supported.
-            indexedDB.open('').onsuccess = function (event) {
-              event.target.result.close() // Close unused connection.
-            }
-          }
-          catch (error) {
-            return reject(new Error('IndexedDB capabilities detected, but a ' +
-              'connection could not be opened. This is most likely due to ' +
-              'browser security settings.'))
-          }
-        else return reject(new Error('IndexedDB pre-requisites not met.'))
-
-        // Need to check for IndexedDB support within Web Worker.
-        blob = new Blob([
-          'self.postMessage(Boolean(self.indexedDB))'
-        ], { type: 'text/javascript' })
-        objectURL = URL.createObjectURL(blob)
-        worker = new Worker(objectURL)
-
-        worker.onmessage = function (message) {
-          return message.data ? resolve() :
-            reject(new Error('No IndexedDB support in Web Worker.'))
-        }
-
-        return null
-      })
-      // After this point, no more checks.
-      .then(function () {
-        return new Promise(function (resolve, reject) {
-          var script, blob, objectURL
-
-          script = [
-            'var primaryKey = "' + primaryKey + '"',
-            'var delimiter = "' + delimiter + '"',
-            'var dataKey = "__data"',
-            '(' + worker.toString() + ')()'
-          ].join(';')
-          blob = new Blob([ script ], { type: 'text/javascript' })
-          objectURL = URL.createObjectURL(blob)
-
-          self.worker = new Worker(objectURL)
-          self.worker.addEventListener('message', listener)
-          self.worker.postMessage({
-            id: id, method: 'connect',
-            name: name, typesArray: typesArray
-          })
-
-          function listener (event) {
-            var data = event.data
-            var result = data.result
-            var type
-
-            if (data.id !== id) return null
-            if (data.error) return reject(new Error(data.error))
-
-            self.worker.removeEventListener('message', listener)
-
-            for (type in result)
-              self.db[type] = reducer(type, result[type])
-
-            return resolve()
-          }
-        })
-      })
-      // Warning and fallback to memory adapter.
-      .catch(function (error) {
-        console.warn(error.message) // eslint-disable-line no-console
-
-        // Assign instance methods of the memory adapter.
-        assign(self, MemoryAdapter.prototype)
-      })
-    })
-
-    // Populating memory database with results from IndexedDB.
-    function reducer (type, records) {
-      return reduce(records, function (hash, record) {
-        record = outputRecord.call(self, type, msgpack.decode(record))
-        hash[record[primaryKey]] = record
-        return hash
-      }, {})
-    }
-  }
-
-
-  IndexedDBAdapter.prototype.disconnect = function () {
-    this.worker.postMessage({ method: 'disconnect' })
-    return MemoryAdapter.prototype.disconnect.call(this)
-  }
-
-
-  IndexedDBAdapter.prototype.create = function (type, records, meta) {
-    var self = this
-    var collection = self.db[type]
-    var ConflictError = self.errors.ConflictError
-    var message = self.message
-    var Promise = self.Promise
-    var language
-
-    if (!meta) meta = {}
-    language = meta.language
-
-    return Promise.resolve(records.length ?
-      new Promise(function (resolve, reject) {
-        var id = generateId()
-        var transfer = []
-
-        self.worker.addEventListener('message', listener)
-        self.worker.postMessage({
-          id: id, method: 'create', type: type,
-          records: reduce(records, function (hash, record) {
-            var data = msgpack.encode(inputRecord.call(self, type, record))
-            var id = record[primaryKey]
-
-            if (collection.hasOwnProperty(id))
-              throw new ConflictError(
-                message('RecordExists', language, { id: id }))
-
-            transfer.push(data.buffer)
-            hash[id] = data
-            return hash
-          }, {})
-        }, transfer)
-
-        function listener (event) {
-          var data = event.data
-
-          if (data.id !== id) return null
-          if (data.error) return reject(new Error(data.error))
-
-          self.worker.removeEventListener('message', listener)
-          return resolve(records)
-        }
-      }) : records)
-    .then(function (records) {
-      return MemoryAdapter.prototype.create.call(self, type, records)
-    })
-  }
-
-
-  IndexedDBAdapter.prototype.find = function (type, ids, options) {
-    return MemoryAdapter.prototype.find.call(this, type, ids, options)
-  }
-
-
-  IndexedDBAdapter.prototype.update = function (type, updates) {
-    var self = this
-    var Promise = self.Promise
-    var db = self.db
-    var id = generateId()
-
-    return Promise.resolve(updates.length ?
-      new Promise(function (resolve, reject) {
-        var i, j, record, records = [], transfer = []
-
-        for (i = 0, j = updates.length; i < j; i++) {
-          record = db[type][updates[i][primaryKey]]
-          if (!record) continue
-          records.push(record)
-        }
-
-        if (!records.length) return resolve()
-
-        self.worker.addEventListener('message', listener)
-        self.worker.postMessage({
-          id: id, method: 'update', type: type,
-          records: reduce(records, function (hash, record) {
-            var data = msgpack.encode(inputRecord.call(self, type, record))
-            transfer.push(data.buffer)
-            hash[record[primaryKey]] = data
-            return hash
-          }, {})
-        }, transfer)
-
-        return null
-
-        function listener (event) {
-          var data = event.data
-
-          if (data.id !== id) return null
-          if (data.error) return reject(new Error(data.error))
-
-          self.worker.removeEventListener('message', listener)
-
-          return resolve()
-        }
-      }) : null)
-    .then(function () {
-      return MemoryAdapter.prototype.update.call(self, type, updates)
-    })
-  }
-
-
-  IndexedDBAdapter.prototype.delete = function (type, ids) {
-    var self = this
-    var Promise = self.Promise
-    var id = generateId()
-
-    return Promise.resolve(!ids || ids.length ?
-      new Promise(function (resolve, reject) {
-        self.worker.addEventListener('message', listener)
-        self.worker.postMessage({
-          id: id, method: ids ? 'delete' : 'deleteAll',
-          type: type, ids: ids
-        })
-
-        function listener (event) {
-          var data = event.data
-
-          if (data.id !== id) return null
-          if (data.error) return reject(new Error(data.error))
-
-          self.worker.removeEventListener('message', listener)
-
-          return resolve()
-        }
-      }) : null)
-    .then(function () {
-      return MemoryAdapter.prototype.delete.call(self, type, ids)
-    })
-  }
-
-  return IndexedDBAdapter
-}
-
-},{"../../../common/array/reduce":15,"../../../common/assign":17,"../../../common/constants":20,"../common":1,"../memory":6,"./helpers":2,"./worker":4,"msgpack-lite":55}],4:[function(require,module,exports){
-'use strict'
-
-module.exports = worker
-
-
-// This function is somewhat special, it is run within a worker context.
-function worker () {
-  var indexedDB = self.indexedDB
-  var db
-  var methodMap = {
-    connect: connect,
-    disconnect: disconnect,
-    create: create,
-    update: update,
-    delete: remove,
-    deleteAll: removeAll
-  }
-
-  self.addEventListener('message', function (event) {
-    var data = event.data
-    var id = data.id
-    var method = data.method
-
-    methodMap[method](data, function (error, result, transfer) {
-      if (error) {
-        self.postMessage({
-          id: id, error: '' + error
-        })
-        return
-      }
-
-      self.postMessage({
-        id: id, result: result
-      }, transfer)
-    })
-  })
-
-
-  function connect (data, callback) {
-    var request = indexedDB.open(data.name)
-    var typesArray = data.typesArray
-
-    request.onerror = errorConnection
-    request.onupgradeneeded = handleUpgrade
-    request.onsuccess = handleSuccess
-
-    function handleSuccess (event) {
-      var i, j
-
-      db = event.target.result
-
-      for (i = 0, j = typesArray.length; i < j; i++)
-        if (!~Array.prototype.indexOf.call(
-          db.objectStoreNames, typesArray[i])) {
-          reconnect()
-          return
-        }
-
-      loadRecords()
-    }
-
-    function handleUpgrade (event) {
-      var i, j, type
-
-      db = event.target.result
-
-      for (i = 0, j = typesArray.length; i < j; i++) {
-        type = typesArray[i]
-        if (!~Array.prototype.indexOf.call(db.objectStoreNames, type))
-          db.createObjectStore(type, { keyPath: primaryKey })
-      }
-
-      for (i = 0, j = db.objectStoreNames.length; i < j; i++) {
-        type = db.objectStoreNames[i]
-        if (!~Array.prototype.indexOf.call(typesArray, type))
-          db.deleteObjectStore(type)
-      }
-    }
-
-    function reconnect () {
-      var version = (db.version || 1) + 1
-
-      db.close()
-      request = indexedDB.open(data.name, version)
-      request.onerror = errorReconnection
-      request.onupgradeneeded = handleUpgrade
-      request.onsuccess = function (event) {
-        db = event.target.result
-        loadRecords(db)
-      }
-    }
-
-    function loadRecords () {
-      var counter = 0
-      var payload = {}
-      var transfer = []
-      var i, j
-
-      for (i = 0, j = typesArray.length; i < j; i++)
-        loadType(typesArray[i])
-
-      function loadType (type) {
-        var transaction = db.transaction(type, 'readonly')
-        var objectStore = transaction.objectStore(type)
-        var cursor = objectStore.openCursor()
-
-        payload[type] = []
-        cursor.onsuccess = function (event) {
-          var iterator = event.target.result
-          if (iterator) {
-            payload[type].push(iterator.value[dataKey])
-            transfer.push(iterator.value[dataKey].buffer)
-            iterator.continue()
-            return
-          }
-          counter++
-          if (counter === typesArray.length)
-            callback(null, payload, transfer)
-        }
-        cursor.onerror = errorIteration
-      }
-    }
-
-    function errorConnection () {
-      callback('The database connection could not be established.')
-    }
-
-    function errorReconnection () {
-      callback('An attempt to reconnect failed.')
-    }
-
-    function errorIteration () {
-      callback('Failed to read record.')
-    }
-  }
-
-
-  function disconnect () {
-    db.close()
-  }
-
-
-  function create (data, callback) {
-    var recordsLength = Object.keys(data.records).length
-    var type = data.type
-    var transaction = db.transaction(type, 'readwrite')
-    var objectStore = transaction.objectStore(type)
-    var id, record, object, request, counter = 0
-
-    for (id in data.records) {
-      record = data.records[id]
-      object = {}
-      object[primaryKey] = type + delimiter + id
-      object[dataKey] = record
-      request = objectStore.add(object)
-      request.onsuccess = check
-      request.onerror = error
-    }
-
-    function check () {
-      counter++
-      if (counter === recordsLength) callback()
-    }
-
-    function error () {
-      callback('A record could not be created.')
-    }
-  }
-
-
-  function update (data, callback) {
-    var recordsLength = Object.keys(data.records).length
-    var type = data.type
-    var transaction = db.transaction(type, 'readwrite')
-    var objectStore = transaction.objectStore(type)
-    var id, record, object, request, counter = 0
-
-    for (id in data.records) {
-      record = data.records[id]
-      object = {}
-      object[primaryKey] = type + delimiter + id
-      object[dataKey] = record
-      request = objectStore.put(object)
-      request.onsuccess = check
-      request.onerror = error
-    }
-
-    function check () {
-      counter++
-      if (counter === recordsLength) callback()
-    }
-
-    function error () {
-      callback('A record could not be updated.')
-    }
-  }
-
-
-  function remove (data, callback) {
-    var type = data.type
-    var ids = data.ids
-    var transaction = db.transaction(type, 'readwrite')
-    var objectStore = transaction.objectStore(type)
-    var i, j, id, request, counter = 0
-
-    for (i = 0, j = ids.length; i < j; i++) {
-      id = ids[i]
-      request = objectStore.delete(type + delimiter + id)
-      request.onsuccess = check
-      request.onerror = error
-    }
-
-    function check () {
-      counter++
-      if (counter === ids.length) callback()
-    }
-
-    function error () {
-      callback('A record could not be deleted.')
-    }
-  }
-
-
-  function removeAll (data, callback) {
-    var type = data.type
-    var transaction = db.transaction(type, 'readwrite')
-    var objectStore = transaction.objectStore(type)
-    var request = objectStore.clear()
-    request.onsuccess = function () { callback() }
-    request.onerror = error
-
-    function error () {
-      callback('Not all records could be deleted.')
-    }
-  }
-}
-
-},{}],5:[function(require,module,exports){
+},{"../../common/array/find":8,"../../common/deep_equal":19,"../../common/errors":20,"../../common/generate_id":22,"../../common/keys":24,"../../common/message":25,"buffer":45}],2:[function(require,module,exports){
 'use strict'
 
 var common = require('../common')
@@ -919,7 +311,7 @@ exports.outputRecord = function (type, record) {
   return result
 }
 
-},{"../common":1}],6:[function(require,module,exports){
+},{"../common":1}],3:[function(require,module,exports){
 'use strict'
 
 var applyUpdate = require('../../../common/apply_update')
@@ -947,7 +339,6 @@ module.exports = function (Adapter) {
   MemoryAdapter.prototype = Object.create(Adapter.prototype)
 
   MemoryAdapter.prototype.connect = function () {
-    var Promise = this.Promise
     var recordTypes = this.recordTypes
     var type
 
@@ -961,7 +352,6 @@ module.exports = function (Adapter) {
 
 
   MemoryAdapter.prototype.disconnect = function () {
-    var Promise = this.Promise
     delete this.db
     return Promise.resolve()
   }
@@ -969,7 +359,6 @@ module.exports = function (Adapter) {
 
   MemoryAdapter.prototype.find = function (type, ids, options, meta) {
     var self = this
-    var Promise = self.Promise
     var recordTypes = self.recordTypes
     var fields = recordTypes[type]
     var collection = self.db[type]
@@ -1001,7 +390,6 @@ module.exports = function (Adapter) {
   MemoryAdapter.prototype.create = function (type, records, meta) {
     var self = this
     var message = self.message
-    var Promise = self.Promise
     var recordsPerType = self.options.recordsPerType
     var primaryKey = self.keys.primary
     var ConflictError = self.errors.ConflictError
@@ -1051,7 +439,6 @@ module.exports = function (Adapter) {
 
   MemoryAdapter.prototype.update = function (type, updates) {
     var self = this
-    var Promise = self.Promise
     var primaryKey = self.keys.primary
     var collection = self.db[type]
     var count = 0
@@ -1082,7 +469,6 @@ module.exports = function (Adapter) {
 
 
   MemoryAdapter.prototype.delete = function (type, ids) {
-    var Promise = this.Promise
     var collection = this.db[type]
     var count = 0
     var i, j, id
@@ -1105,19 +491,26 @@ module.exports = function (Adapter) {
     return Promise.resolve(count)
   }
 
+  // Expose utility functions.
+  MemoryAdapter.common = common
+
   return MemoryAdapter
 }
 
-},{"../../../common/apply_update":10,"../../../common/array/map":13,"../common":1,"./helpers":5}],7:[function(require,module,exports){
+},{"../../../common/apply_update":6,"../../../common/array/map":10,"../common":1,"./helpers":2}],4:[function(require,module,exports){
 'use strict'
 
 var assign = require('../common/assign')
+var memoryAdapter = require('./adapters/memory')
 
 
 /**
  * Adapter is an abstract base class containing methods to be implemented. All
  * records returned by the adapter must have the primary key `id`. The primary
  * key **MUST** be a string or a number.
+ *
+ * It has one static property, `defaultAdapter` which is a reference to the
+ * memory adapter.
  */
 function Adapter (properties) {
   assign(this, properties)
@@ -1128,15 +521,14 @@ function Adapter (properties) {
  * The Adapter should not be instantiated directly, since the constructor
  * function accepts dependencies. The keys which are injected are:
  *
- * - `methods`: same as static property on Fortune class.
- * - `errors`: same as static property on Fortune class.
- * - `keys`: an object which enumerates reserved constants for record type
  * definitions.
  * - `recordTypes`: an object which enumerates record types and their
  * definitions.
  * - `options`: the options passed to the adapter.
+ * - `common`: an object containing all internal utilities.
+ * - `errors`: same as static property on Fortune class.
+ * - `keys`: an object which enumerates reserved constants for record type
  * - `message`: a function with the signature (`id`, `language`, `data`).
- * - `Promise`: the Promise implementation.
  *
  * These keys are accessible on the instance (`this`).
  */
@@ -1391,16 +783,20 @@ Adapter.prototype.applyOperators = function (record) {
 }
 
 
+// Expose the default adapter.
+Adapter.DefaultAdapter = memoryAdapter(Adapter)
+
+
 module.exports = Adapter
 
-},{"../common/assign":17}],8:[function(require,module,exports){
+},{"../common/assign":14,"./adapters/memory":3}],5:[function(require,module,exports){
 'use strict'
 
 var Adapter = require('./')
+var common = require('../common')
 var errors = require('../common/errors')
 var keys = require('../common/keys')
 var message = require('../common/message')
-var promise = require('../common/promise')
 
 
 /**
@@ -1424,81 +820,20 @@ function AdapterSingleton (properties) {
   return new CustomAdapter({
     options: input[1] || {},
     recordTypes: properties.recordTypes,
+    common: common,
     errors: errors,
     keys: keys,
     message: message,
-    Promise: promise.Promise
+
+    // For backwards compatibility.
+    Promise: Promise
   })
 }
 
 
 module.exports = AdapterSingleton
 
-},{"../common/errors":22,"../common/keys":24,"../common/message":25,"../common/promise":27,"./":7}],9:[function(require,module,exports){
-'use strict'
-
-// Local modules.
-var Core = require('./core')
-var promise = require('./common/promise')
-var assign = require('./common/assign')
-
-// Static exports.
-var memory = require('./adapter/adapters/memory')
-var indexedDB = require('./adapter/adapters/indexeddb')
-var request = require('./net/websocket_request')
-var client = require('./net/websocket_client')
-var sync = require('./net/websocket_sync')
-
-var adapters = {
-  memory: memory,
-  indexedDB: indexedDB
-}
-
-var net = {
-  request: request,
-  client: client,
-  sync: sync
-}
-
-
-/**
- * This class just extends Core with some default serializers and static
- * properties.
- */
-function Fortune (recordTypes, options) {
-  if (!(this instanceof Fortune)) return new Fortune(recordTypes, options)
-
-  if (options === void 0) options = {}
-
-  // Try to use IndexedDB first, fall back to memory adapter.
-  if (!('adapter' in options))
-    options.adapter = [ indexedDB ]
-
-  if (!('settings' in options))
-    options.settings = {}
-
-  if (!('enforceLinks' in options.settings))
-    options.settings.enforceLinks = false
-
-  return this.constructor(recordTypes, options)
-}
-
-
-Fortune.prototype = Object.create(Core.prototype)
-assign(Fortune, Core)
-promise.assignPromise(Fortune, 'Promise')
-
-
-// Assign useful static properties to the default export.
-assign(Fortune, {
-  adapters: adapters,
-  net: net
-})
-
-
-module.exports = Fortune
-
-},{"./adapter/adapters/indexeddb":3,"./adapter/adapters/memory":6,"./common/assign":17,"./common/promise":27,"./core":29,"./net/websocket_client":41,"./net/websocket_request":42,"./net/websocket_sync":43}],10:[function(require,module,exports){
+},{"../common":23,"../common/errors":20,"../common/keys":24,"../common/message":25,"./":4}],6:[function(require,module,exports){
 'use strict'
 
 var pull = require('./array/pull')
@@ -1527,7 +862,27 @@ module.exports = function applyUpdate (record, update) {
       pull(record[field], update.pull[field]) : []
 }
 
-},{"./array/pull":14}],11:[function(require,module,exports){
+},{"./array/pull":11}],7:[function(require,module,exports){
+'use strict'
+
+/**
+ * A more performant `Array.prototype.filter`.
+ *
+ * @param {*[]} array
+ * @param {Function} fn
+ * @return {Boolean}
+ */
+module.exports = function filter (array, fn) {
+  var i, j, k = [], l = 0
+
+  for (i = 0, j = array.length; i < j; i++)
+    if (fn(array[i], i, array))
+      k[l++] = array[i]
+
+  return k
+}
+
+},{}],8:[function(require,module,exports){
 'use strict'
 
 /**
@@ -1549,7 +904,7 @@ module.exports = function find (array, fn) {
   return void 0
 }
 
-},{}],12:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
 'use strict'
 
 /**
@@ -1568,7 +923,7 @@ module.exports = function includes (array, value) {
   return false
 }
 
-},{}],13:[function(require,module,exports){
+},{}],10:[function(require,module,exports){
 'use strict'
 
 /**
@@ -1587,7 +942,7 @@ module.exports = function map (array, fn) {
   return k
 }
 
-},{}],14:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 'use strict'
 
 
@@ -1616,7 +971,7 @@ module.exports = function pull (array, values) {
   return clone
 }
 
-},{}],15:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 'use strict'
 
 /**
@@ -1636,7 +991,7 @@ module.exports = function reduce (array, fn, initialValue) {
   return k
 }
 
-},{}],16:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 'use strict'
 
 /**
@@ -1661,7 +1016,7 @@ module.exports = function unique (a) {
   return result
 }
 
-},{}],17:[function(require,module,exports){
+},{}],14:[function(require,module,exports){
 'use strict'
 
 /**
@@ -1685,7 +1040,7 @@ module.exports = function assign (target) {
   return target
 }
 
-},{}],18:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 'use strict'
 
 module.exports = function castToNumber (id) {
@@ -1695,7 +1050,90 @@ module.exports = function castToNumber (id) {
   return id - float + 1 >= 0 ? float : id
 }
 
-},{}],19:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
+(function (Buffer){
+'use strict'
+
+var errors = require('./errors')
+var message = require('./message')
+var castToNumber = require('./cast_to_number')
+var BadRequestError = errors.BadRequestError
+var buffer = Buffer.from || Buffer
+
+
+var castByType = [
+  [ Number, function (x) { return parseFloat(x) } ],
+
+  [ Date, function (x, options) {
+    if (typeof x === 'string') {
+      x = Date.parse(x)
+      if (Number.isNaN(x)) throw new BadRequestError(
+        message('DateISO8601', options.language))
+    }
+
+    x = new Date(x)
+    if (Number.isNaN(x.getTime())) throw new BadRequestError(
+      message('DateInvalid', options.language))
+
+    return x
+  } ],
+
+  [ Buffer, function (x, options) {
+    var bufferEncoding = options && options.bufferEncoding ?
+      options.bufferEncoding : 'base64'
+
+    if (typeof x !== 'string') throw new BadRequestError(
+      message('BufferEncoding', options.language, {
+        bufferEncoding: bufferEncoding
+      }))
+
+    return buffer(x, bufferEncoding)
+  } ],
+
+  [ Boolean, function (x) {
+    if (typeof x === 'string') return x === 'true'
+    return Boolean(x)
+  } ],
+
+  [ Object, function (x, options) {
+    if (typeof x === 'string') return JSON.parse(x)
+    if (typeof x === 'object') return x
+    throw new BadRequestError(message('JSONParse', options.language))
+  } ],
+
+  [ String, function (x) { return '' + x } ]
+]
+
+
+/**
+ * Cast a value to the given type. Skip if type is missing or value is null.
+ *
+ * @param {*} value
+ * @param {Function} type - Constructor function.
+ * @param {Object} [options]
+ * @return {*}
+ */
+module.exports = function castValue (value, type, options) {
+  var i, j, pair, cast
+
+  // Special case for empty string: it should be null.
+  if (value === '') return null
+
+  if (type)
+    for (i = 0, j = castByType.length; i < j; i++) {
+      pair = castByType[i]
+      if (pair[0] === type) {
+        cast = pair[1]
+        break
+      }
+    }
+  else return castToNumber(value)
+
+  return cast && value !== null ? cast(value, options) : value
+}
+
+}).call(this,require("buffer").Buffer)
+},{"./cast_to_number":15,"./errors":20,"./message":25,"buffer":45}],17:[function(require,module,exports){
 'use strict'
 
 /**
@@ -1723,7 +1161,7 @@ module.exports = function clone (input) {
   return output
 }
 
-},{}],20:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 'use strict'
 
 // The primary key that must exist per record, can not be user defined.
@@ -1751,7 +1189,7 @@ exports.create = 'create'
 exports.update = 'update'
 exports.delete = 'delete'
 
-},{}],21:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 (function (Buffer){
 'use strict'
 
@@ -1811,7 +1249,7 @@ function deepEqual (a, b) {
 module.exports = deepEqual
 
 }).call(this,{"isBuffer":require("../../node_modules/is-buffer/index.js")})
-},{"../../node_modules/is-buffer/index.js":54}],22:[function(require,module,exports){
+},{"../../node_modules/is-buffer/index.js":50}],20:[function(require,module,exports){
 'use strict'
 
 var responseClass = require('./response_classes')
@@ -1826,7 +1264,7 @@ exports.ConflictError = responseClass.ConflictError
 exports.UnsupportedError = responseClass.UnsupportedError
 exports.nativeErrors = responseClass.nativeErrors
 
-},{"./response_classes":28}],23:[function(require,module,exports){
+},{"./response_classes":27}],21:[function(require,module,exports){
 'use strict'
 
 var constants = require('./constants')
@@ -1837,7 +1275,52 @@ exports.connect = constants.connect
 exports.disconnect = constants.disconnect
 exports.failure = constants.failure
 
-},{"./constants":20}],24:[function(require,module,exports){
+},{"./constants":18}],22:[function(require,module,exports){
+'use strict'
+
+module.exports = function generateId () {
+  return Date.now() + '-' +
+    ('00000000' + Math.floor(Math.random() * Math.pow(2, 32)).toString(16))
+    .slice(-8)
+}
+
+},{}],23:[function(require,module,exports){
+'use strict'
+
+module.exports = {
+  // Keys
+  constants: require('./constants'),
+  keys: require('./keys'),
+  events: require('./events'),
+  methods: require('./methods'),
+
+  // Utility functions
+  assign: require('./assign'),
+  castToNumber: require('./cast_to_number'),
+  castValue: require('./cast_value'),
+  clone: require('./clone'),
+  deepEqual: require('./deep_equal'),
+  generateId: require('./generate_id'),
+
+  // i18n
+  message: require('./message'),
+
+  // Typed responses
+  responses: require('./response_classes'),
+  errors: require('./errors'),
+  successes: require('./success'),
+
+  // Arrays
+  filter: require('./array/filter'),
+  find: require('./array/find'),
+  includes: require('./array/includes'),
+  map: require('./array/map'),
+  pull: require('./array/pull'),
+  reduce: require('./array/reduce'),
+  unique: require('./array/unique')
+}
+
+},{"./array/filter":7,"./array/find":8,"./array/includes":9,"./array/map":10,"./array/pull":11,"./array/reduce":12,"./array/unique":13,"./assign":14,"./cast_to_number":15,"./cast_value":16,"./clone":17,"./constants":18,"./deep_equal":19,"./errors":20,"./events":21,"./generate_id":22,"./keys":24,"./message":25,"./methods":26,"./response_classes":27,"./success":28}],24:[function(require,module,exports){
 'use strict'
 
 var constants = require('./constants')
@@ -1849,7 +1332,7 @@ exports.isArray = constants.isArray
 exports.inverse = constants.inverse
 exports.denormalizedInverse = constants.denormalizedInverse
 
-},{"./constants":20}],25:[function(require,module,exports){
+},{"./constants":18}],25:[function(require,module,exports){
 'use strict'
 
 var genericMessage = 'GenericError'
@@ -1963,27 +1446,7 @@ exports.create = constants.create
 exports.update = constants.update
 exports.delete = constants.delete
 
-},{"./constants":20}],27:[function(require,module,exports){
-'use strict'
-
-// This object exists as a container for the Promise implementation. By
-// default, it's the native one.
-exports.Promise = Promise
-
-// Assigning a property for the Promise implementation.
-exports.assignPromise = function (obj, key) {
-  Object.defineProperty(obj, key, {
-    enumerable: true,
-    get: function () {
-      return exports.Promise
-    },
-    set: function (x) {
-      exports.Promise = x
-    }
-  })
-}
-
-},{}],28:[function(require,module,exports){
+},{"./constants":18}],27:[function(require,module,exports){
 'use strict'
 
 var errorClass = require('error-class')
@@ -2022,589 +1485,19 @@ function successClass (name) {
     'assign(this, x) }')(assign)
 }
 
-},{"./assign":17,"error-class":50}],29:[function(require,module,exports){
+},{"./assign":14,"error-class":47}],28:[function(require,module,exports){
 'use strict'
 
-var EventLite = require('event-lite')
+var responseClass = require('./response_classes')
 
-// Local modules.
-var memoryAdapter = require('./adapter/adapters/memory')
-var AdapterSingleton = require('./adapter/singleton')
-var assign = require('./common/assign')
-var validate = require('./record_type/validate')
-var ensureTypes = require('./record_type/ensure_types')
-var dispatch = require('./dispatch')
-var promise = require('./common/promise')
-var middlewares = dispatch.middlewares
+exports.OK = responseClass.OK
+exports.Created = responseClass.Created
+exports.Empty = responseClass.Empty
 
-// Static re-exports.
-var Adapter = require('./adapter')
-var errors = require('./common/errors')
-var methods = require('./common/methods')
-var events = require('./common/events')
-var message = require('./common/message')
-
-var plainObject = {}
-
-
-/**
- * This is the default export of the `fortune` package. It implements a
- * [subset of `EventEmitter`](https://www.npmjs.com/package/event-lite), and it
- * has a few static properties attached to it that may be useful to access:
- *
- * - `Adapter`: abstract base class for the Adapter.
- * - `adapters`: included adapters, defaults to memory adapter. Note that the
- * browser build also includes `indexedDB` and `webStorage` adapters.
- * - `net`: network protocol helpers, varies based on client or server build.
- * - `errors`: custom typed errors, useful for throwing errors in I/O hook
- * functions.
- * - `methods`: a hash that maps to string constants. Available are: `find`,
- * `create`, `update`, and `delete`.
- * - `events`: names for events on the Fortune instance. Available are:
- * `change`, `sync`, `connect`, `disconnect`, `failure`.
- * - `message`: a function which accepts the arguments (`id`, `language`,
- * `data`). It has properties keyed by two-letter language codes, which by
- * default includes only `en`.
- * - `Promise`: by default, the native Promise implementation is used. If an
- * alternative is desired, simply assign this property with the new Promise
- * implementation. This will affect all instances of Fortune.
- */
-function Fortune (options) {
-  this.constructor(options)
-}
-
-
-// Inherit from EventLite class.
-Fortune.prototype = Object.create(EventLite.prototype)
-
-
-/**
- * Create a new instance, the only required input is record type definitions.
- * The first argument must be an object keyed by name, valued by definition
- * objects.
- *
- * Here are some example field definitions:
- *
- * ```js
- * {
- *   // Top level keys are names of record types.
- *   person: {
- *     // Data types may be singular or plural.
- *     name: String, // Singular string value.
- *     luckyNumbers: Array(Number), // Array of numbers.
- *
- *     // Relationships may be singular or plural. They must specify which
- *     // record type it refers to, and may also specify an inverse field
- *     // which is optional but recommended.
- *     pets: [ Array('animal'), 'owner' ], // Has many.
- *     employer: [ 'organization', 'employees' ], // Belongs to.
- *     likes: Array('thing'), // Has many (no inverse).
- *     doing: 'activity', // Belongs to (no inverse).
- *
- *     // Reflexive relationships are relationships in which the record type,
- *     // the first position, is of the same type.
- *     following: [ Array('person'), 'followers' ],
- *     followers: [ Array('person'), 'following' ],
- *
- *     // Mutual relationships are relationships in which the inverse,
- *     // the second position, is defined to be the same field on the same
- *     // record type.
- *     friends: [ Array('person'), 'friends' ],
- *     spouse: [ 'person', 'spouse' ]
- *   }
- * }
- * ```
- *
- * The above shows the shorthand which will be transformed internally to a
- * more verbose data structure. The internal structure is as follows:
- *
- * ```js
- * {
- *   person: {
- *     // A singular value.
- *     name: { type: String },
- *
- *     // An array containing values of a single type.
- *     luckyNumbers: { type: Number, isArray: true },
- *
- *     // Creates a to-many link to `animal` record type. If the field `owner`
- *     // on the `animal` record type is not an array, this is a many-to-one
- *     // relationship, otherwise it is many-to-many.
- *     pets: { link: 'animal', isArray: true, inverse: 'owner' },
- *
- *     // The `min` and `max` keys are open to interpretation by the specific
- *     // adapter, which may introspect the field definition.
- *     thing: { type: Number, min: 0, max: 100 },
- *
- *     // Nested field definitions are invalid. Use `Object` type instead.
- *     nested: { thing: { ... } } // Will throw an error.
- *   }
- * }
- * ```
- *
- * The allowed native types are `String`, `Number`, `Boolean`, `Date`,
- * `Object`, and `Buffer`. Note that the `Object` type should be a JSON
- * serializable object that may be persisted. The only other allowed type is
- * a `Function`, which may be used to define custom types.
- *
- * A custom type function should accept one argument, the value, and return a
- * boolean based on whether the value is valid for the type or not. It may
- * optionally have a method `compare`, used for sorting in the built-in
- * adapters. The `compare` method should have the same signature as the native
- * `Array.prototype.sort`.
- *
- * A custom type function must inherit one of the allowed native types. For
- * example:
- *
- * ```js
- * function Integer (x) { return (x | 0) === x }
- * Integer.prototype = Object.create(Number.prototype)
- * ```
- *
- * The options object may contain the following keys:
- *
- * - `adapter`: configuration array for the adapter. The default type is the
- *   memory adapter. If the value is not an array, its settings will be
- *   considered omitted.
- *
- *   ```js
- *   {
- *     adapter: [
- *       // Must be a class that extends `Fortune.Adapter`, or a function
- *       // that accepts the Adapter class and returns a subclass. Required.
- *       Adapter => { ... },
- *
- *       // An options object that is specific to the adapter. Optional.
- *       { ... }
- *     ]
- *   }
- *   ```
- *
- * - `hooks`: keyed by type name, valued by an array containing an `input`
- *   and/or `output` function at indices `0` and `1` respectively.
- *
- *   A hook function takes at least two arguments, the internal `context`
- *   object and a single `record`. A special case is the `update` argument for
- *   the `update` method.
- *
- *   There are only two kinds of hooks, before a record is written (input),
- *   and after a record is read (output), both are optional. If an error occurs
- *   within a hook function, it will be forwarded to the response. Use typed
- *   errors to provide the appropriate feedback.
- *
- *   For a create request, the input hook may return the second argument
- *   `record` either synchronously, or asynchronously as a Promise. The return
- *   value of a delete request is inconsequential, but it may return a value or
- *   a Promise. The `update` method accepts a `update` object as a third
- *   parameter, which may be returned synchronously or as a Promise.
- *
- *   An example hook to apply a timestamp on a record before creation, and
- *   displaying the timestamp in the server's locale:
- *
- *   ```js
- *   {
- *     recordType: [
- *       (context, record, update) => {
- *         switch (context.request.method) {
- *           case 'create':
- *             record.timestamp = new Date()
- *             return record
- *           case 'update': return update
- *           case 'delete': return null
- *         }
- *       },
- *       (context, record) => {
- *         record.timestamp = record.timestamp.toLocaleString()
- *         return record
- *       }
- *     ]
- *   }
- *   ```
- *
- *   Requests to update a record will **NOT** have the updates already applied
- *   to the record.
- *
- *   Another feature of the input hook is that it will have access to a
- *   temporary field `context.transaction`. This is useful for ensuring that
- *   bulk write operations are all or nothing. Each request is treated as a
- *   single transaction.
- *
- * - `documentation`: an object mapping names to descriptions. Note that there
- *   is only one namepspace, so field names can only have one description.
- *   This is optional, but useful for the HTML serializer, which also emits
- *   this information as micro-data.
- *
- *   ```js
- *   {
- *     documentation: {
- *       recordType: 'Description of a type.',
- *       fieldName: 'Description of a field.',
- *       anotherFieldName: {
- *         en: 'Two letter language code indicates localized description.'
- *       }
- *     }
- *   }
- *   ```
- *
- * - `settings`: internal settings to configure.
- *
- *   ```js
- *   {
- *     settings: {
- *       // Whether or not to enforce referential integrity. Default: `true`
- *       // for server, `false` for browser.
- *       enforceLinks: true,
- *
- *       // Name of the application used for display purposes.
- *       name: 'My Awesome Application',
- *
- *       // Description of the application used for display purposes.
- *       description: 'media type "application/vnd.micro+json"'
- *     }
- *   }
- *   ```
- *
- * The return value of the constructor is the instance itself.
- *
- * @param {Object} recordTypes
- * @param {Object} [options]
- * @return {Fortune}
- */
-Fortune.prototype.constructor = function (recordTypes, options) {
-  var self = this
-  var adapter, method, stack, flows, type, hooks, i, j
-
-  if (typeof recordTypes !== 'object')
-    throw new TypeError('First argument must be an object.')
-
-  if (!Object.keys(recordTypes).length)
-    throw new Error('At least one type must be specified.')
-
-  // DEPRECATION: "transforms" has been deprecated in favor of "hooks".
-  if ('transforms' in options) options.hooks = options.transforms
-
-  if (!('adapter' in options)) options.adapter = [ memoryAdapter ]
-  if (!('settings' in options)) options.settings = {}
-  if (!('hooks' in options)) options.hooks = {}
-  if (!('enforceLinks' in options.settings))
-    options.settings.enforceLinks = true
-
-  // Bind middleware methods to instance.
-  flows = {}
-  for (method in methods) {
-    stack = [ middlewares[method], middlewares.include, middlewares.end ]
-
-    for (i = 0, j = stack.length; i < j; i++)
-      stack[i] = bindMiddleware(self, stack[i])
-
-    flows[methods[method]] = stack
-  }
-
-  hooks = options.hooks
-
-  // Validate hooks.
-  for (type in hooks) {
-    if (!recordTypes.hasOwnProperty(type)) throw new Error(
-      'Attempted to define hook on "' + type + '" type ' +
-      'which does not exist.')
-    if (!Array.isArray(hooks[type]))
-      throw new TypeError('Hook value for "' + type + '" type ' +
-        'must be an array.')
-  }
-
-  // Validate record types.
-  for (type in recordTypes) {
-    if (type in plainObject)
-      throw new Error('Can not define type name "' + type +
-        '" which is in Object.prototype.')
-
-    validate(recordTypes[type])
-    if (!hooks.hasOwnProperty(type)) hooks[type] = []
-  }
-
-  /*!
-   * Adapter singleton that is coupled to the Fortune instance.
-   *
-   * @type {Adapter}
-   */
-  adapter = new AdapterSingleton({
-    adapter: options.adapter,
-    recordTypes: recordTypes,
-    hooks: hooks
-  })
-
-  // Internal properties.
-  Object.defineProperties(self, {
-    // 0 = not started, 1 = started, 2 = done.
-    connectionStatus: { value: 0, writable: true },
-
-    // Configuration settings.
-    options: { value: options },
-    hooks: { value: hooks },
-    recordTypes: { value: recordTypes, enumerable: true },
-
-    // Singleton instances.
-    adapter: { value: adapter, enumerable: true, configurable: true },
-
-    // Dispatch.
-    flows: { value: flows }
-  })
-}
-
-
-/**
- * This is the primary method for initiating a request. The options object
- * may contain the following keys:
- *
- * - `method`: The method is a either a function or a constant, which is keyed
- *   under `Fortune.methods` and may be one of `find`, `create`, `update`,  or
- *   `delete`. Default: `find`.
- *
- * - `type`: Name of a type. **Required**.
- *
- * - `ids`: An array of IDs. Used for `find` and `delete` methods only. This is
- *   optional for the `find` method.
- *
- * - `include`: A 2-dimensional array specifying links to include. The first
- *   dimension is a list, the second dimension is depth. For example:
- *   `[['comments'], ['comments', 'author', { ... }]]`. The last item within
- *   the list may be an `options` object, useful for specifying how the
- *   included records should appear. Optional.
- *
- * - `options`: Exactly the same as the [`find` method](#adapter-find)
- *   options in the adapter. These options do not apply on methods other than
- *   `find`, and do not affect the records returned from `include`. Optional.
- *
- * - `meta`: Meta-information object of the request. Optional.
- *
- * - `payload`: Payload of the request. **Required** for `create` and `update`
- *   methods only, and must be an array of objects. The objects must be the
- *   records to create, or update objects as expected by the Adapter.
- *
- * The response object may contain the following keys:
- *
- * - `meta`: Meta-info of the response.
- *
- * - `payload`: An object containing the following keys:
- *   - `records`: An array of records returned.
- *   - `count`: Total number of records without options applied (only for
- *     responses to the `find` method).
- *   - `include`: An object keyed by type, valued by arrays of included
- *     records.
- *
- * The resolved response object should always be an instance of a response
- * type.
- *
- * @param {Object} options
- * @return {Promise}
- */
-Fortune.prototype.request = function (options) {
-  var self = this
-  var Promise = promise.Promise
-  var connectionStatus = self.connectionStatus
-
-  if (connectionStatus === 0)
-    return self.connect()
-    .then(function () { return dispatch(self, options) })
-
-  else if (connectionStatus === 1)
-    return new Promise(function (resolve, reject) {
-      // Wait for changes to connection status.
-      self.once(events.failure, function () {
-        reject(new Error('Connection failed.'))
-      })
-      self.once(events.connect, function () {
-        resolve(dispatch(self, options))
-      })
-    })
-
-  return dispatch(self, options)
-}
-
-
-/**
- * The `find` method retrieves record by type given IDs, querying options,
- * or both. This is a convenience method that wraps around the `request`
- * method, see the `request` method for documentation on its arguments.
- *
- * @param {String} type
- * @param {*|*[]} [ids]
- * @param {Object} [options]
- * @param {Array[]} [include]
- * @param {Object} [meta]
- * @return {Promise}
- */
-Fortune.prototype.find = function () {
-  var options = { method: methods.find, type: arguments[0] }
-
-  if (arguments[1] != null) options.ids = Array.isArray(arguments[1]) ?
-    arguments[1] : [ arguments[1] ]
-  if (arguments[2] != null) options.options = arguments[2]
-  if (arguments[3] != null) options.include = arguments[3]
-  if (arguments[4] != null) options.meta = arguments[4]
-
-  return this.request(options)
-}
-
-
-/**
- * The `create` method creates records by type given records to create. This
- * is a convenience method that wraps around the `request` method, see the
- * request `method` for documentation on its arguments.
- *
- * @param {String} type
- * @param {Object|Object[]} records
- * @param {Array[]} [include]
- * @param {Object} [meta]
- * @return {Promise}
- */
-Fortune.prototype.create = function () {
-  var options = { method: methods.create, type: arguments[0],
-    payload: Array.isArray(arguments[1]) ? arguments[1] : [ arguments[1] ] }
-
-  if (arguments[2] != null) options.include = arguments[2]
-  if (arguments[3] != null) options.meta = arguments[3]
-
-  return this.request(options)
-}
-
-
-/**
- * The `update` method updates records by type given update objects. See the
- * [Adapter.update](#adapter-update) method for the format of the update
- * objects. This is a convenience method that wraps around the `request`
- * method, see the `request` method for documentation on its arguments.
- *
- * @param {String} type
- * @param {Object|Object[]} updates
- * @param {Array[]} [include]
- * @param {Object} [meta]
- * @return {Promise}
- */
-Fortune.prototype.update = function () {
-  var options = { method: methods.update, type: arguments[0],
-    payload: Array.isArray(arguments[1]) ? arguments[1] : [ arguments[1] ] }
-
-  if (arguments[2] != null) options.include = arguments[2]
-  if (arguments[3] != null) options.meta = arguments[3]
-
-  return this.request(options)
-}
-
-
-/**
- * The `delete` method deletes records by type given IDs (optional). This is a
- * convenience method that wraps around the `request` method, see the `request`
- * method for documentation on its arguments.
- *
- * @param {String} type
- * @param {*|*[]} [ids]
- * @param {Array[]} [include]
- * @param {Object} [meta]
- * @return {Promise}
- */
-Fortune.prototype.delete = function () {
-  var options = { method: methods.delete, type: arguments[0] }
-
-  if (arguments[1] != null) options.ids = Array.isArray(arguments[1]) ?
-    arguments[1] : [ arguments[1] ]
-  if (arguments[2] != null) options.include = arguments[2]
-  if (arguments[3] != null) options.meta = arguments[3]
-
-  return this.request(options)
-}
-
-
-/**
- * This method does not need to be called manually, it is automatically called
- * upon the first request if it is not connected already. However, it may be
- * useful if manually reconnect is needed. The resolved value is the instance
- * itself.
- *
- * @return {Promise}
- */
-Fortune.prototype.connect = function () {
-  var self = this
-  var Promise = promise.Promise
-
-  if (self.connectionStatus === 1)
-    return Promise.reject(new Error('Connection is in progress.'))
-
-  else if (self.connectionStatus === 2)
-    return Promise.reject(new Error('Connection is already done.'))
-
-  self.connectionStatus = 1
-
-  return new Promise(function (resolve, reject) {
-    ensureTypes(self.recordTypes)
-
-    self.adapter.connect().then(function () {
-      self.connectionStatus = 2
-      self.emit(events.connect)
-      return resolve(self)
-    }, function (error) {
-      self.connectionStatus = 0
-      self.emit(events.failure)
-      return reject(error)
-    })
-  })
-}
-
-
-/**
- * Close adapter connection, and reset connection state. The resolved value is
- * the instance itself.
- *
- * @return {Promise}
- */
-Fortune.prototype.disconnect = function () {
-  var self = this
-  var Promise = promise.Promise
-
-  if (self.connectionStatus !== 2)
-    return Promise.reject(new Error('Instance has not been connected.'))
-
-  self.connectionStatus = 1
-
-  return new Promise(function (resolve, reject) {
-    return self.adapter.disconnect().then(function () {
-      self.connectionStatus = 0
-      self.emit(events.disconnect)
-      return resolve(self)
-    }, function (error) {
-      self.connectionStatus = 2
-      self.emit(events.failure)
-      return reject(error)
-    })
-  })
-}
-
-
-// Assign useful static properties to the default export.
-assign(Fortune, {
-  Adapter: Adapter,
-  errors: errors,
-  methods: methods,
-  message: message,
-  events: events
-})
-
-
-// Internal helper function.
-function bindMiddleware (scope, method) {
-  return function (x) {
-    return method.call(scope, x)
-  }
-}
-
-
-module.exports = Fortune
-
-},{"./adapter":7,"./adapter/adapters/memory":6,"./adapter/singleton":8,"./common/assign":17,"./common/errors":22,"./common/events":23,"./common/message":25,"./common/methods":26,"./common/promise":27,"./dispatch":36,"./record_type/ensure_types":45,"./record_type/validate":46,"event-lite":51}],30:[function(require,module,exports){
+},{"./response_classes":27}],29:[function(require,module,exports){
 'use strict'
 
 var message = require('../common/message')
-var promise = require('../common/promise')
 var unique = require('../common/array/unique')
 var map = require('../common/array/map')
 var includes = require('../common/array/includes')
@@ -2630,7 +1523,6 @@ var inverseKey = keys.inverse
  * @return {Promise}
  */
 module.exports = function checkLinks (record, fields, links, meta) {
-  var Promise = promise.Promise
   var adapter = this.adapter
   var enforceLinks = this.options.settings.enforceLinks
 
@@ -2685,14 +1577,13 @@ module.exports = function checkLinks (record, fields, links, meta) {
   })
 }
 
-},{"../common/array/includes":12,"../common/array/map":13,"../common/array/unique":16,"../common/errors":22,"../common/keys":24,"../common/message":25,"../common/promise":27}],31:[function(require,module,exports){
+},{"../common/array/includes":9,"../common/array/map":10,"../common/array/unique":13,"../common/errors":20,"../common/keys":24,"../common/message":25}],30:[function(require,module,exports){
 'use strict'
 
 var validateRecords = require('./validate_records')
 var checkLinks = require('./check_links')
 var enforce = require('../record_type/enforce')
 var message = require('../common/message')
-var promise = require('../common/promise')
 var map = require('../common/array/map')
 
 var errors = require('../common/errors')
@@ -2721,7 +1612,6 @@ var denormalizedInverseKey = constants.denormalizedInverse
  */
 module.exports = function (context) {
   var self = this
-  var Promise = promise.Promise
   var adapter = self.adapter
   var recordTypes = self.recordTypes
   var hooks = self.hooks
@@ -2876,11 +1766,10 @@ module.exports = function (context) {
   })
 }
 
-},{"../common/array/map":13,"../common/constants":20,"../common/errors":22,"../common/message":25,"../common/promise":27,"../record_type/enforce":44,"./check_links":30,"./update_helpers":38,"./validate_records":39}],32:[function(require,module,exports){
+},{"../common/array/map":10,"../common/constants":18,"../common/errors":20,"../common/message":25,"../record_type/enforce":41,"./check_links":29,"./update_helpers":37,"./validate_records":38}],31:[function(require,module,exports){
 'use strict'
 
 var message = require('../common/message')
-var promise = require('../common/promise')
 var map = require('../common/array/map')
 
 var errors = require('../common/errors')
@@ -2907,7 +1796,6 @@ var isArrayKey = constants.isArray
  */
 module.exports = function (context) {
   var self = this
-  var Promise = promise.Promise
   var request = context.request
   var type = request.type
   var ids = request.ids
@@ -3032,11 +1920,10 @@ module.exports = function (context) {
   })
 }
 
-},{"../common/array/map":13,"../common/constants":20,"../common/errors":22,"../common/message":25,"../common/promise":27,"./update_helpers":38}],33:[function(require,module,exports){
+},{"../common/array/map":10,"../common/constants":18,"../common/errors":20,"../common/message":25,"./update_helpers":37}],32:[function(require,module,exports){
 'use strict'
 
 var map = require('../common/array/map')
-var promise = require('../common/promise')
 
 
 /**
@@ -3045,7 +1932,6 @@ var promise = require('../common/promise')
  * @return {Promise}
  */
 module.exports = function (context) {
-  var Promise = promise.Promise
   var hooks = this.hooks
   var request = context.request
   var response = context.response
@@ -3114,7 +2000,7 @@ module.exports = function (context) {
   })
 }
 
-},{"../common/array/map":13,"../common/promise":27}],34:[function(require,module,exports){
+},{"../common/array/map":10}],33:[function(require,module,exports){
 'use strict'
 
 /**
@@ -3144,10 +2030,9 @@ module.exports = function (context) {
   })
 }
 
-},{}],35:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 'use strict'
 
-var promise = require('../common/promise')
 var map = require('../common/array/map')
 var find = require('../common/array/find')
 var reduce = require('../common/array/reduce')
@@ -3167,7 +2052,6 @@ var linkKey = keys.link
  * @return {Promise}
  */
 module.exports = function include (context) {
-  var Promise = promise.Promise
   var request = context.request
   var type = request.type
   var ids = request.ids || []
@@ -3328,10 +2212,9 @@ function matchId (id) {
   }
 }
 
-},{"../common/array/find":11,"../common/array/map":13,"../common/array/reduce":15,"../common/errors":22,"../common/keys":24,"../common/promise":27}],36:[function(require,module,exports){
+},{"../common/array/find":8,"../common/array/map":10,"../common/array/reduce":12,"../common/errors":20,"../common/keys":24}],35:[function(require,module,exports){
 'use strict'
 
-var promise = require('../common/promise')
 var assign = require('../common/assign')
 var unique = require('../common/array/unique')
 var message = require('../common/message')
@@ -3359,7 +2242,6 @@ var createMethod = methods.create
 function dispatch (scope, options) {
   var flows = scope.flows
   var recordTypes = scope.recordTypes
-  var Promise = promise.Promise
   var context = setDefaults(options)
 
   // Start a promise chain.
@@ -3463,7 +2345,7 @@ function setDefaults (options) {
 
 module.exports = dispatch
 
-},{"../common/array/unique":16,"../common/assign":17,"../common/message":25,"../common/methods":26,"../common/promise":27,"../common/response_classes":28,"./create":31,"./delete":32,"./end":33,"./find":34,"./include":35,"./update":37}],37:[function(require,module,exports){
+},{"../common/array/unique":13,"../common/assign":14,"../common/message":25,"../common/methods":26,"../common/response_classes":27,"./create":30,"./delete":31,"./end":32,"./find":33,"./include":34,"./update":36}],36:[function(require,module,exports){
 'use strict'
 
 var deepEqual = require('../common/deep_equal')
@@ -3473,7 +2355,6 @@ var validateRecords = require('./validate_records')
 var checkLinks = require('./check_links')
 var enforce = require('../record_type/enforce')
 var message = require('../common/message')
-var promise = require('../common/promise')
 var applyUpdate = require('../common/apply_update')
 
 var updateHelpers = require('./update_helpers')
@@ -3507,7 +2388,6 @@ var denormalizedInverseKey = constants.denormalizedInverse
  */
 module.exports = function (context) {
   var self = this
-  var Promise = promise.Promise
   var adapter = self.adapter
   var recordTypes = self.recordTypes
   var hooks = self.hooks
@@ -3869,7 +2749,7 @@ function dropFields (update, fields) {
     if (!fields.hasOwnProperty(field)) delete update.push[field]
 }
 
-},{"../common/apply_update":10,"../common/array/find":11,"../common/array/includes":12,"../common/array/map":13,"../common/assign":17,"../common/clone":19,"../common/constants":20,"../common/deep_equal":21,"../common/errors":22,"../common/message":25,"../common/promise":27,"../record_type/enforce":44,"./check_links":30,"./update_helpers":38,"./validate_records":39}],38:[function(require,module,exports){
+},{"../common/apply_update":6,"../common/array/find":8,"../common/array/includes":9,"../common/array/map":10,"../common/assign":14,"../common/clone":17,"../common/constants":18,"../common/deep_equal":19,"../common/errors":20,"../common/message":25,"../record_type/enforce":41,"./check_links":29,"./update_helpers":37,"./validate_records":38}],37:[function(require,module,exports){
 'use strict'
 
 var find = require('../common/array/find')
@@ -3924,7 +2804,7 @@ exports.removeId = function (id, update, field, isArray) {
   update.replace[field] = null
 }
 
-},{"../common/array/find":11,"../common/keys":24}],39:[function(require,module,exports){
+},{"../common/array/find":8,"../common/keys":24}],38:[function(require,module,exports){
 'use strict'
 
 var message = require('../common/message')
@@ -3995,212 +2875,587 @@ module.exports = function validateRecords (records, fields, links, meta) {
   }
 }
 
-},{"../common/errors":22,"../common/keys":24,"../common/message":25}],40:[function(require,module,exports){
+},{"../common/errors":20,"../common/keys":24,"../common/message":25}],39:[function(require,module,exports){
 'use strict'
 
-window.fortune = require('./browser')
+window.fortune = require('./')
 
-},{"./browser":9}],41:[function(require,module,exports){
+},{"./":40}],40:[function(require,module,exports){
 'use strict'
 
-var core = require('../core')
-var wsRequest = require('./websocket_request')
+var EventLite = require('event-lite')
+
+// Local modules.
+var memoryAdapter = require('./adapter/adapters/memory')
+var AdapterSingleton = require('./adapter/singleton')
+var validate = require('./record_type/validate')
+var ensureTypes = require('./record_type/ensure_types')
+var dispatch = require('./dispatch')
+var middlewares = dispatch.middlewares
+
+// Static re-exports.
+var Adapter = require('./adapter')
+var common = require('./common')
+var assign = common.assign
+var methods = common.methods
+var events = common.events
+
+// Using this later to check for keys in Object.prototype.
+var plainObject = {}
 
 
 /**
- * Given a W3C WebSocket client, return an object that contains Fortune
- * instance methods `request`, `find`, `create`, `update`, `delete`, and a new
- * method `state` for changing connection state. This is merely a convenience
- * method that wraps around `fortune.net.request`. For example:
+ * This is the default export of the `fortune` package. It implements a
+ * [subset of `EventEmitter`](https://www.npmjs.com/package/event-lite), and it
+ * has a few static properties attached to it that may be useful to access:
  *
- * ```js
- * // https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
- * var client = new WebSocket(url, protocols)
- * var remote = fortune.net.client(client)
- *
- * // `remote` is an object containing Fortune instance methods, and the
- * // `state` method.
- * remote.request(...)
- * remote.state(...)
- * ```
- *
- * @param {WebSocket} client
- * @return {Object}
+ * - `Adapter`: abstract base class for the Adapter.
+ * - `adapters`: included adapters, defaults to memory adapter.
+ * - `errors`: custom error types, useful for throwing errors in I/O hooks.
+ * - `methods`: a hash that maps to string constants. Available are: `find`,
+ *   `create`, `update`, and `delete`.
+ * - `events`: names for events on the Fortune instance. Available are:
+ *   `change`, `sync`, `connect`, `disconnect`, `failure`.
+ * - `message`: a function which accepts the arguments (`id`, `language`,
+ *   `data`). It has properties keyed by two-letter language codes, which by
+ *   default includes only `en`.
+ * - `common`: common dependencies object, containing the above and more.
  */
-function client (client) {
-  // Using the closure here to refer to the client.
-  return {
-    request: function request (options) {
-      return wsRequest(client, options)
-    },
-    state: function state (state) {
-      return wsRequest(client, null, state)
-    },
-    find: core.prototype.find,
-    create: core.prototype.create,
-    update: core.prototype.update,
-    delete: core.prototype.delete
-  }
+function Fortune (recordTypes, options) {
+  if (!(this instanceof Fortune)) return new Fortune(recordTypes, options)
+  this.constructor(recordTypes, options)
 }
 
-module.exports = client
 
-},{"../core":29,"./websocket_request":42}],42:[function(require,module,exports){
-'use strict'
-
-var msgpack = require('msgpack-lite')
-var promise = require('../common/promise')
-var common = require('../adapter/adapters/common')
-var generateId = common.generateId
+// Inherit from EventLite class.
+Fortune.prototype = Object.create(EventLite.prototype)
 
 
 /**
- * Given a W3C WebSocket client, send a request using the Fortune wire
- * protocol, and get a response back as a Promise. This will not create a
- * client, it needs to be created externally, and this method will
- * automatically wait if it is not connected yet. For example:
+ * Create a new instance, the only required input is record type definitions.
+ * The first argument must be an object keyed by name, valued by definition
+ * objects.
+ *
+ * Here are some example field definitions:
  *
  * ```js
- * // https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
- * var client = new WebSocket(url, protocols)
- * fortune.net.request(client, options)
+ * {
+ *   // Top level keys are names of record types.
+ *   person: {
+ *     // Data types may be singular or plural.
+ *     name: String, // Singular string value.
+ *     luckyNumbers: Array(Number), // Array of numbers.
+ *
+ *     // Relationships may be singular or plural. They must specify which
+ *     // record type it refers to, and may also specify an inverse field
+ *     // which is optional but recommended.
+ *     pets: [ Array('animal'), 'owner' ], // Has many.
+ *     employer: [ 'organization', 'employees' ], // Belongs to.
+ *     likes: Array('thing'), // Has many (no inverse).
+ *     doing: 'activity', // Belongs to (no inverse).
+ *
+ *     // Reflexive relationships are relationships in which the record type,
+ *     // the first position, is of the same type.
+ *     following: [ Array('person'), 'followers' ],
+ *     followers: [ Array('person'), 'following' ],
+ *
+ *     // Mutual relationships are relationships in which the inverse,
+ *     // the second position, is defined to be the same field on the same
+ *     // record type.
+ *     friends: [ Array('person'), 'friends' ],
+ *     spouse: [ 'person', 'spouse' ]
+ *   }
+ * }
  * ```
  *
- * The `options` object is exactly the same as that defined by
- * `fortune.request`, and the `state` object is an arbitrary object to send
- * to request a state change. Either `options` or `state` must be passed.
+ * The above shows the shorthand which will be transformed internally to a
+ * more verbose data structure. The internal structure is as follows:
  *
- * @param {WebSocket} client
+ * ```js
+ * {
+ *   person: {
+ *     // A singular value.
+ *     name: { type: String },
+ *
+ *     // An array containing values of a single type.
+ *     luckyNumbers: { type: Number, isArray: true },
+ *
+ *     // Creates a to-many link to `animal` record type. If the field `owner`
+ *     // on the `animal` record type is not an array, this is a many-to-one
+ *     // relationship, otherwise it is many-to-many.
+ *     pets: { link: 'animal', isArray: true, inverse: 'owner' },
+ *
+ *     // The `min` and `max` keys are open to interpretation by the specific
+ *     // adapter, which may introspect the field definition.
+ *     thing: { type: Number, min: 0, max: 100 },
+ *
+ *     // Nested field definitions are invalid. Use `Object` type instead.
+ *     nested: { thing: { ... } } // Will throw an error.
+ *   }
+ * }
+ * ```
+ *
+ * The allowed native types are `String`, `Number`, `Boolean`, `Date`,
+ * `Object`, and `Buffer`. Note that the `Object` type should be a JSON
+ * serializable object that may be persisted. The only other allowed type is
+ * a `Function`, which may be used to define custom types.
+ *
+ * A custom type function should accept one argument, the value, and return a
+ * boolean based on whether the value is valid for the type or not. It may
+ * optionally have a method `compare`, used for sorting in the built-in
+ * adapters. The `compare` method should have the same signature as the native
+ * `Array.prototype.sort`.
+ *
+ * A custom type function must inherit one of the allowed native types. For
+ * example:
+ *
+ * ```js
+ * function Integer (x) { return (x | 0) === x }
+ * Integer.prototype = Object.create(Number.prototype)
+ * ```
+ *
+ * The options object may contain the following keys:
+ *
+ * - `adapter`: configuration array for the adapter. The default type is the
+ *   memory adapter. If the value is not an array, its settings will be
+ *   considered omitted.
+ *
+ *   ```js
+ *   {
+ *     adapter: [
+ *       // Must be a class that extends `Fortune.Adapter`, or a function
+ *       // that accepts the Adapter class and returns a subclass. Required.
+ *       Adapter => { ... },
+ *
+ *       // An options object that is specific to the adapter. Optional.
+ *       { ... }
+ *     ]
+ *   }
+ *   ```
+ *
+ * - `hooks`: keyed by type name, valued by an array containing an `input`
+ *   and/or `output` function at indices `0` and `1` respectively.
+ *
+ *   A hook function takes at least two arguments, the internal `context`
+ *   object and a single `record`. A special case is the `update` argument for
+ *   the `update` method.
+ *
+ *   There are only two kinds of hooks, before a record is written (input),
+ *   and after a record is read (output), both are optional. If an error occurs
+ *   within a hook function, it will be forwarded to the response. Use typed
+ *   errors to provide the appropriate feedback.
+ *
+ *   For a create request, the input hook may return the second argument
+ *   `record` either synchronously, or asynchronously as a Promise. The return
+ *   value of a delete request is inconsequential, but it may return a value or
+ *   a Promise. The `update` method accepts a `update` object as a third
+ *   parameter, which may be returned synchronously or as a Promise.
+ *
+ *   An example hook to apply a timestamp on a record before creation, and
+ *   displaying the timestamp in the server's locale:
+ *
+ *   ```js
+ *   {
+ *     recordType: [
+ *       (context, record, update) => {
+ *         switch (context.request.method) {
+ *           case 'create':
+ *             record.timestamp = new Date()
+ *             return record
+ *           case 'update': return update
+ *           case 'delete': return null
+ *         }
+ *       },
+ *       (context, record) => {
+ *         record.timestamp = record.timestamp.toLocaleString()
+ *         return record
+ *       }
+ *     ]
+ *   }
+ *   ```
+ *
+ *   Requests to update a record will **NOT** have the updates already applied
+ *   to the record.
+ *
+ *   Another feature of the input hook is that it will have access to a
+ *   temporary field `context.transaction`. This is useful for ensuring that
+ *   bulk write operations are all or nothing. Each request is treated as a
+ *   single transaction.
+ *
+ * - `documentation`: an object mapping names to descriptions. Note that there
+ *   is only one namepspace, so field names can only have one description.
+ *   This is optional, but useful for the HTML serializer, which also emits
+ *   this information as micro-data.
+ *
+ *   ```js
+ *   {
+ *     documentation: {
+ *       recordType: 'Description of a type.',
+ *       fieldName: 'Description of a field.',
+ *       anotherFieldName: {
+ *         en: 'Two letter language code indicates localized description.'
+ *       }
+ *     }
+ *   }
+ *   ```
+ *
+ * - `settings`: internal settings to configure.
+ *
+ *   ```js
+ *   {
+ *     settings: {
+ *       // Whether or not to enforce referential integrity. Default: `true`
+ *       // for server, `false` for browser.
+ *       enforceLinks: true,
+ *
+ *       // Name of the application used for display purposes.
+ *       name: 'My Awesome Application',
+ *
+ *       // Description of the application used for display purposes.
+ *       description: 'media type "application/vnd.micro+json"'
+ *     }
+ *   }
+ *   ```
+ *
+ * The return value of the constructor is the instance itself.
+ *
+ * @param {Object} recordTypes
  * @param {Object} [options]
- * @param {Object} [state]
+ * @return {Fortune}
+ */
+Fortune.prototype.constructor = function Fortune (recordTypes, options) {
+  var self = this
+  var adapter, method, stack, flows, type, hooks, i, j
+
+  if (typeof recordTypes !== 'object')
+    throw new TypeError('First argument must be an object.')
+
+  if (!Object.keys(recordTypes).length)
+    throw new Error('At least one type must be specified.')
+
+  if (options === void 0) options = {}
+
+  if (!('adapter' in options)) options.adapter = [ memoryAdapter(Adapter) ]
+  if (!('settings' in options)) options.settings = {}
+  if (!('hooks' in options)) options.hooks = {}
+  if (!('enforceLinks' in options.settings))
+    options.settings.enforceLinks = true
+
+  // Bind middleware methods to instance.
+  flows = {}
+  for (method in methods) {
+    stack = [ middlewares[method], middlewares.include, middlewares.end ]
+
+    for (i = 0, j = stack.length; i < j; i++)
+      stack[i] = bindMiddleware(self, stack[i])
+
+    flows[methods[method]] = stack
+  }
+
+  hooks = options.hooks
+
+  // Validate hooks.
+  for (type in hooks) {
+    if (!recordTypes.hasOwnProperty(type)) throw new Error(
+      'Attempted to define hook on "' + type + '" type ' +
+      'which does not exist.')
+    if (!Array.isArray(hooks[type]))
+      throw new TypeError('Hook value for "' + type + '" type ' +
+        'must be an array.')
+  }
+
+  // Validate record types.
+  for (type in recordTypes) {
+    if (type in plainObject)
+      throw new Error('Can not define type name "' + type +
+        '" which is in Object.prototype.')
+
+    validate(recordTypes[type])
+    if (!hooks.hasOwnProperty(type)) hooks[type] = []
+  }
+
+  /*!
+   * Adapter singleton that is coupled to the Fortune instance.
+   *
+   * @type {Adapter}
+   */
+  adapter = new AdapterSingleton({
+    adapter: options.adapter,
+    recordTypes: recordTypes,
+    hooks: hooks
+  })
+
+  // Internal properties.
+  Object.defineProperties(self, {
+    // 0 = not started, 1 = started, 2 = done.
+    connectionStatus: { value: 0, writable: true },
+
+    // Configuration settings.
+    options: { value: options },
+    hooks: { value: hooks },
+    recordTypes: { value: recordTypes, enumerable: true },
+
+    // Singleton instances.
+    adapter: { value: adapter, enumerable: true, configurable: true },
+
+    // Dispatch.
+    flows: { value: flows },
+
+    // Useful for dependency injection.
+    common: { value: common, enumerable: true }
+  })
+}
+
+
+/**
+ * This is the primary method for initiating a request. The options object
+ * may contain the following keys:
+ *
+ * - `method`: The method is a either a function or a constant, which is keyed
+ *   under `Fortune.common.methods` and may be one of `find`, `create`,
+ *   `update`, or `delete`. Default: `find`.
+ *
+ * - `type`: Name of a type. **Required**.
+ *
+ * - `ids`: An array of IDs. Used for `find` and `delete` methods only. This is
+ *   optional for the `find` method.
+ *
+ * - `include`: A 2-dimensional array specifying links to include. The first
+ *   dimension is a list, the second dimension is depth. For example:
+ *   `[['comments'], ['comments', 'author', { ... }]]`. The last item within
+ *   the list may be an `options` object, useful for specifying how the
+ *   included records should appear. Optional.
+ *
+ * - `options`: Exactly the same as the [`find` method](#adapter-find)
+ *   options in the adapter. These options do not apply on methods other than
+ *   `find`, and do not affect the records returned from `include`. Optional.
+ *
+ * - `meta`: Meta-information object of the request. Optional.
+ *
+ * - `payload`: Payload of the request. **Required** for `create` and `update`
+ *   methods only, and must be an array of objects. The objects must be the
+ *   records to create, or update objects as expected by the Adapter.
+ *
+ * The response object may contain the following keys:
+ *
+ * - `meta`: Meta-info of the response.
+ *
+ * - `payload`: An object containing the following keys:
+ *   - `records`: An array of records returned.
+ *   - `count`: Total number of records without options applied (only for
+ *     responses to the `find` method).
+ *   - `include`: An object keyed by type, valued by arrays of included
+ *     records.
+ *
+ * The resolved response object should always be an instance of a response
+ * type.
+ *
+ * @param {Object} options
  * @return {Promise}
  */
-function request (client, options, state) {
-  var Promise = promise.Promise
-  var id = generateId()
-  var data = { id: id }
-  var readyState = client.readyState
-  var rejectListener
+Fortune.prototype.request = function (options) {
+  var self = this
+  var connectionStatus = self.connectionStatus
 
-  if (options && state) throw new Error('Must specify only options or state.')
-  else if (options) data.request = options
-  else if (state) data.state = state
-  else throw new Error('Missing argument options or state.')
+  if (connectionStatus === 0)
+    return self.connect()
+    .then(function () { return dispatch(self, options) })
 
-  if (readyState > 1)
-    throw new Error('WebSocket Client is closing or has been closed.')
-
-  return (readyState === 0 ? new Promise(function (resolve, reject) {
-    rejectListener = reject
-    client.addEventListener('open', resolve, { once: true })
-    client.addEventListener('error', reject, { once: true })
-  }) : Promise.resolve())
-  .then(function () {
-    client.removeEventListener('error', rejectListener)
-
+  else if (connectionStatus === 1)
     return new Promise(function (resolve, reject) {
-      client.binaryType = 'arraybuffer'
-      client.addEventListener('message', listener)
-      client.send(msgpack.encode(data))
+      // Wait for changes to connection status.
+      self.once(events.failure, function () {
+        reject(new Error('Connection failed.'))
+      })
+      self.once(events.connect, function () {
+        resolve(dispatch(self, options))
+      })
+    })
 
-      function listener (event) {
-        var data
+  return dispatch(self, options)
+}
 
-        if ('decoded' in event) data = event.decoded
-        else try {
-          data = event.decoded = msgpack.decode(new Uint8Array(event.data))
-        }
-        catch (error) {
-          return reject(error)
-        }
 
-        // Ignore other responses.
-        if (data.id !== id) return null
+/**
+ * The `find` method retrieves record by type given IDs, querying options,
+ * or both. This is a convenience method that wraps around the `request`
+ * method, see the `request` method for documentation on its arguments.
+ *
+ * @param {String} type
+ * @param {*|*[]} [ids]
+ * @param {Object} [options]
+ * @param {Array[]} [include]
+ * @param {Object} [meta]
+ * @return {Promise}
+ */
+Fortune.prototype.find = function () {
+  var options = { method: methods.find, type: arguments[0] }
 
-        client.removeEventListener('message', listener)
+  if (arguments[1] != null) options.ids = Array.isArray(arguments[1]) ?
+    arguments[1] : [ arguments[1] ]
+  if (arguments[2] != null) options.options = arguments[2]
+  if (arguments[3] != null) options.include = arguments[3]
+  if (arguments[4] != null) options.meta = arguments[4]
 
-        return 'error' in data ?
-          reject(new Error(data.error || 'No error specified.')) :
-          resolve(data)
-      }
+  return this.request(options)
+}
+
+
+/**
+ * The `create` method creates records by type given records to create. This
+ * is a convenience method that wraps around the `request` method, see the
+ * request `method` for documentation on its arguments.
+ *
+ * @param {String} type
+ * @param {Object|Object[]} records
+ * @param {Array[]} [include]
+ * @param {Object} [meta]
+ * @return {Promise}
+ */
+Fortune.prototype.create = function () {
+  var options = { method: methods.create, type: arguments[0],
+    payload: Array.isArray(arguments[1]) ? arguments[1] : [ arguments[1] ] }
+
+  if (arguments[2] != null) options.include = arguments[2]
+  if (arguments[3] != null) options.meta = arguments[3]
+
+  return this.request(options)
+}
+
+
+/**
+ * The `update` method updates records by type given update objects. See the
+ * [Adapter.update](#adapter-update) method for the format of the update
+ * objects. This is a convenience method that wraps around the `request`
+ * method, see the `request` method for documentation on its arguments.
+ *
+ * @param {String} type
+ * @param {Object|Object[]} updates
+ * @param {Array[]} [include]
+ * @param {Object} [meta]
+ * @return {Promise}
+ */
+Fortune.prototype.update = function () {
+  var options = { method: methods.update, type: arguments[0],
+    payload: Array.isArray(arguments[1]) ? arguments[1] : [ arguments[1] ] }
+
+  if (arguments[2] != null) options.include = arguments[2]
+  if (arguments[3] != null) options.meta = arguments[3]
+
+  return this.request(options)
+}
+
+
+/**
+ * The `delete` method deletes records by type given IDs (optional). This is a
+ * convenience method that wraps around the `request` method, see the `request`
+ * method for documentation on its arguments.
+ *
+ * @param {String} type
+ * @param {*|*[]} [ids]
+ * @param {Array[]} [include]
+ * @param {Object} [meta]
+ * @return {Promise}
+ */
+Fortune.prototype.delete = function () {
+  var options = { method: methods.delete, type: arguments[0] }
+
+  if (arguments[1] != null) options.ids = Array.isArray(arguments[1]) ?
+    arguments[1] : [ arguments[1] ]
+  if (arguments[2] != null) options.include = arguments[2]
+  if (arguments[3] != null) options.meta = arguments[3]
+
+  return this.request(options)
+}
+
+
+/**
+ * This method does not need to be called manually, it is automatically called
+ * upon the first request if it is not connected already. However, it may be
+ * useful if manually reconnect is needed. The resolved value is the instance
+ * itself.
+ *
+ * @return {Promise}
+ */
+Fortune.prototype.connect = function () {
+  var self = this
+
+  if (self.connectionStatus === 1)
+    return Promise.reject(new Error('Connection is in progress.'))
+
+  else if (self.connectionStatus === 2)
+    return Promise.reject(new Error('Connection is already done.'))
+
+  self.connectionStatus = 1
+
+  return new Promise(function (resolve, reject) {
+    ensureTypes(self.recordTypes)
+
+    self.adapter.connect().then(function () {
+      self.connectionStatus = 2
+      self.emit(events.connect)
+      return resolve(self)
+    }, function (error) {
+      self.connectionStatus = 0
+      self.emit(events.failure)
+      return reject(error)
     })
   })
 }
 
-module.exports = request
-
-},{"../adapter/adapters/common":1,"../common/promise":27,"msgpack-lite":55}],43:[function(require,module,exports){
-'use strict'
-
-var Fortune = require('../core')
-var promise = require('../common/promise')
-var msgpack = require('msgpack-lite')
-var constants = require('../common/constants')
-var syncEvent = constants.sync
-var failureEvent = constants.failure
-
 
 /**
- * Given a W3C WebSocket client and an instance of Fortune, try to synchronize
- * records based on the `changes` data pushed from the server. This function
- * returns the event listener function.
+ * Close adapter connection, and reset connection state. The resolved value is
+ * the instance itself.
  *
- * When a sync is completed, it emits the `sync` event with the changes data,
- * or the `failure` event if something failed.
- *
- * Optionally, a `merge` function may be passed, which accepts one argument,
- * the remote changes, and is expected to return the changes to accept. This
- * is useful for preventing remote changes from overriding local changes.
- *
- * @param {WebSocket} client
- * @param {Fortune} instance
- * @param {Function} [merge]
- * @return {Function}
+ * @return {Promise}
  */
-function sync (client, instance, merge) {
-  var Promise = promise.Promise
+Fortune.prototype.disconnect = function () {
+  var self = this
 
-  if (!(instance instanceof Fortune))
-    throw new TypeError('An instance of Fortune is required.')
+  if (self.connectionStatus !== 2)
+    return Promise.reject(new Error('Instance has not been connected.'))
 
-  client.binaryType = 'arraybuffer'
-  client.addEventListener('message', syncListener)
+  self.connectionStatus = 1
 
-  function syncListener (event) {
-    var data, promises = [], changes, method, type
-
-    if ('decoded' in event) data = event.decoded
-    else
-      try {
-        data = event.decoded = msgpack.decode(new Uint8Array(event.data))
-      }
-      catch (error) {
-        return instance.emit(failureEvent, error)
-      }
-
-    // Ignore if changes are not present.
-    if (!('changes' in data)) return null
-
-    changes = merge === void 0 ? data.changes : merge(data.changes)
-
-    for (method in changes)
-      for (type in changes[method])
-        promises.push(instance.adapter[method](type, changes[method][type]))
-
-    return Promise.all(promises)
-    .then(function () {
-      instance.emit(syncEvent, changes)
+  return new Promise(function (resolve, reject) {
+    return self.adapter.disconnect().then(function () {
+      self.connectionStatus = 0
+      self.emit(events.disconnect)
+      return resolve(self)
     }, function (error) {
-      instance.emit(failureEvent, error)
+      self.connectionStatus = 2
+      self.emit(events.failure)
+      return reject(error)
     })
-  }
-
-  return syncListener
+  })
 }
 
-module.exports = sync
 
-},{"../common/constants":20,"../common/promise":27,"../core":29,"msgpack-lite":55}],44:[function(require,module,exports){
+// Assign useful static properties to the default export.
+assign(Fortune, {
+  Adapter: Adapter,
+  adapters: {
+    memory: memoryAdapter(Adapter)
+  },
+  errors: common.errors,
+  message: common.message,
+  methods: methods,
+  events: events
+})
+
+
+// Internal helper function.
+function bindMiddleware (scope, method) {
+  return function (x) {
+    return method.call(scope, x)
+  }
+}
+
+
+module.exports = Fortune
+
+},{"./adapter":4,"./adapter/adapters/memory":3,"./adapter/singleton":5,"./common":23,"./dispatch":35,"./record_type/ensure_types":42,"./record_type/validate":43,"event-lite":48}],41:[function(require,module,exports){
 (function (Buffer){
 'use strict'
 
@@ -4341,7 +3596,7 @@ function matchId (a) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"../common/array/find":11,"../common/errors":22,"../common/keys":24,"../common/message":25,"buffer":48}],45:[function(require,module,exports){
+},{"../common/array/find":8,"../common/errors":20,"../common/keys":24,"../common/message":25,"buffer":45}],42:[function(require,module,exports){
 'use strict'
 
 var keys = require('../common/keys')
@@ -4422,7 +3677,7 @@ module.exports = function ensureTypes (types) {
     }
 }
 
-},{"../common/keys":24}],46:[function(require,module,exports){
+},{"../common/keys":24}],43:[function(require,module,exports){
 (function (Buffer){
 'use strict'
 
@@ -4552,9 +3807,10 @@ function castShorthand (value) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"../common/array/find":11,"../common/keys":24,"buffer":48}],47:[function(require,module,exports){
+},{"../common/array/find":8,"../common/keys":24,"buffer":45}],44:[function(require,module,exports){
 'use strict'
 
+exports.byteLength = byteLength
 exports.toByteArray = toByteArray
 exports.fromByteArray = fromByteArray
 
@@ -4562,23 +3818,17 @@ var lookup = []
 var revLookup = []
 var Arr = typeof Uint8Array !== 'undefined' ? Uint8Array : Array
 
-function init () {
-  var code = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-  for (var i = 0, len = code.length; i < len; ++i) {
-    lookup[i] = code[i]
-    revLookup[code.charCodeAt(i)] = i
-  }
-
-  revLookup['-'.charCodeAt(0)] = 62
-  revLookup['_'.charCodeAt(0)] = 63
+var code = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+for (var i = 0, len = code.length; i < len; ++i) {
+  lookup[i] = code[i]
+  revLookup[code.charCodeAt(i)] = i
 }
 
-init()
+revLookup['-'.charCodeAt(0)] = 62
+revLookup['_'.charCodeAt(0)] = 63
 
-function toByteArray (b64) {
-  var i, j, l, tmp, placeHolders, arr
+function placeHoldersCount (b64) {
   var len = b64.length
-
   if (len % 4 > 0) {
     throw new Error('Invalid string. Length must be a multiple of 4')
   }
@@ -4588,9 +3838,19 @@ function toByteArray (b64) {
   // represent one byte
   // if there is only one, then the three characters before it represent 2 bytes
   // this is just a cheap hack to not do indexOf twice
-  placeHolders = b64[len - 2] === '=' ? 2 : b64[len - 1] === '=' ? 1 : 0
+  return b64[len - 2] === '=' ? 2 : b64[len - 1] === '=' ? 1 : 0
+}
 
+function byteLength (b64) {
   // base64 is 4/3 + up to two characters of the original data
+  return b64.length * 3 / 4 - placeHoldersCount(b64)
+}
+
+function toByteArray (b64) {
+  var i, j, l, tmp, placeHolders, arr
+  var len = b64.length
+  placeHolders = placeHoldersCount(b64)
+
   arr = new Arr(len * 3 / 4 - placeHolders)
 
   // if there are placeholders, only get up to the last complete 4 chars
@@ -4663,7 +3923,7 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],48:[function(require,module,exports){
+},{}],45:[function(require,module,exports){
 (function (global){
 /*!
  * The buffer module from node.js, for the browser.
@@ -4832,6 +4092,8 @@ if (Buffer.TYPED_ARRAY_SUPPORT) {
 function assertSize (size) {
   if (typeof size !== 'number') {
     throw new TypeError('"size" argument must be a number')
+  } else if (size < 0) {
+    throw new RangeError('"size" argument must not be negative')
   }
 }
 
@@ -4895,12 +4157,20 @@ function fromString (that, string, encoding) {
   var length = byteLength(string, encoding) | 0
   that = createBuffer(that, length)
 
-  that.write(string, encoding)
+  var actual = that.write(string, encoding)
+
+  if (actual !== length) {
+    // Writing a hex string, for example, that contains invalid characters will
+    // cause everything after the first invalid character to be ignored. (e.g.
+    // 'abxxcd' will be treated as 'ab')
+    that = that.slice(0, actual)
+  }
+
   return that
 }
 
 function fromArrayLike (that, array) {
-  var length = checked(array.length) | 0
+  var length = array.length < 0 ? 0 : checked(array.length) | 0
   that = createBuffer(that, length)
   for (var i = 0; i < length; i += 1) {
     that[i] = array[i] & 255
@@ -4969,7 +4239,7 @@ function fromObject (that, obj) {
 }
 
 function checked (length) {
-  // Note: cannot use `length < kMaxLength` here because that fails when
+  // Note: cannot use `length < kMaxLength()` here because that fails when
   // length is NaN (which is otherwise coerced to zero.)
   if (length >= kMaxLength()) {
     throw new RangeError('Attempt to allocate Buffer larger than maximum ' +
@@ -5018,9 +4288,9 @@ Buffer.isEncoding = function isEncoding (encoding) {
     case 'utf8':
     case 'utf-8':
     case 'ascii':
+    case 'latin1':
     case 'binary':
     case 'base64':
-    case 'raw':
     case 'ucs2':
     case 'ucs-2':
     case 'utf16le':
@@ -5081,9 +4351,8 @@ function byteLength (string, encoding) {
   for (;;) {
     switch (encoding) {
       case 'ascii':
+      case 'latin1':
       case 'binary':
-      case 'raw':
-      case 'raws':
         return len
       case 'utf8':
       case 'utf-8':
@@ -5156,8 +4425,9 @@ function slowToString (encoding, start, end) {
       case 'ascii':
         return asciiSlice(this, start, end)
 
+      case 'latin1':
       case 'binary':
-        return binarySlice(this, start, end)
+        return latin1Slice(this, start, end)
 
       case 'base64':
         return base64Slice(this, start, end)
@@ -5205,6 +4475,20 @@ Buffer.prototype.swap32 = function swap32 () {
   for (var i = 0; i < len; i += 4) {
     swap(this, i, i + 3)
     swap(this, i + 1, i + 2)
+  }
+  return this
+}
+
+Buffer.prototype.swap64 = function swap64 () {
+  var len = this.length
+  if (len % 8 !== 0) {
+    throw new RangeError('Buffer size must be a multiple of 64-bits')
+  }
+  for (var i = 0; i < len; i += 8) {
+    swap(this, i, i + 7)
+    swap(this, i + 1, i + 6)
+    swap(this, i + 2, i + 5)
+    swap(this, i + 3, i + 4)
   }
   return this
 }
@@ -5291,7 +4575,73 @@ Buffer.prototype.compare = function compare (target, start, end, thisStart, this
   return 0
 }
 
-function arrayIndexOf (arr, val, byteOffset, encoding) {
+// Finds either the first index of `val` in `buffer` at offset >= `byteOffset`,
+// OR the last index of `val` in `buffer` at offset <= `byteOffset`.
+//
+// Arguments:
+// - buffer - a Buffer to search
+// - val - a string, Buffer, or number
+// - byteOffset - an index into `buffer`; will be clamped to an int32
+// - encoding - an optional encoding, relevant is val is a string
+// - dir - true for indexOf, false for lastIndexOf
+function bidirectionalIndexOf (buffer, val, byteOffset, encoding, dir) {
+  // Empty buffer means no match
+  if (buffer.length === 0) return -1
+
+  // Normalize byteOffset
+  if (typeof byteOffset === 'string') {
+    encoding = byteOffset
+    byteOffset = 0
+  } else if (byteOffset > 0x7fffffff) {
+    byteOffset = 0x7fffffff
+  } else if (byteOffset < -0x80000000) {
+    byteOffset = -0x80000000
+  }
+  byteOffset = +byteOffset  // Coerce to Number.
+  if (isNaN(byteOffset)) {
+    // byteOffset: it it's undefined, null, NaN, "foo", etc, search whole buffer
+    byteOffset = dir ? 0 : (buffer.length - 1)
+  }
+
+  // Normalize byteOffset: negative offsets start from the end of the buffer
+  if (byteOffset < 0) byteOffset = buffer.length + byteOffset
+  if (byteOffset >= buffer.length) {
+    if (dir) return -1
+    else byteOffset = buffer.length - 1
+  } else if (byteOffset < 0) {
+    if (dir) byteOffset = 0
+    else return -1
+  }
+
+  // Normalize val
+  if (typeof val === 'string') {
+    val = Buffer.from(val, encoding)
+  }
+
+  // Finally, search either indexOf (if dir is true) or lastIndexOf
+  if (Buffer.isBuffer(val)) {
+    // Special case: looking for empty string/buffer always fails
+    if (val.length === 0) {
+      return -1
+    }
+    return arrayIndexOf(buffer, val, byteOffset, encoding, dir)
+  } else if (typeof val === 'number') {
+    val = val & 0xFF // Search for a byte value [0-255]
+    if (Buffer.TYPED_ARRAY_SUPPORT &&
+        typeof Uint8Array.prototype.indexOf === 'function') {
+      if (dir) {
+        return Uint8Array.prototype.indexOf.call(buffer, val, byteOffset)
+      } else {
+        return Uint8Array.prototype.lastIndexOf.call(buffer, val, byteOffset)
+      }
+    }
+    return arrayIndexOf(buffer, [ val ], byteOffset, encoding, dir)
+  }
+
+  throw new TypeError('val must be string, number or Buffer')
+}
+
+function arrayIndexOf (arr, val, byteOffset, encoding, dir) {
   var indexSize = 1
   var arrLength = arr.length
   var valLength = val.length
@@ -5318,60 +4668,45 @@ function arrayIndexOf (arr, val, byteOffset, encoding) {
     }
   }
 
-  var foundIndex = -1
-  for (var i = byteOffset; i < arrLength; ++i) {
-    if (read(arr, i) === read(val, foundIndex === -1 ? 0 : i - foundIndex)) {
-      if (foundIndex === -1) foundIndex = i
-      if (i - foundIndex + 1 === valLength) return foundIndex * indexSize
-    } else {
-      if (foundIndex !== -1) i -= i - foundIndex
-      foundIndex = -1
+  var i
+  if (dir) {
+    var foundIndex = -1
+    for (i = byteOffset; i < arrLength; i++) {
+      if (read(arr, i) === read(val, foundIndex === -1 ? 0 : i - foundIndex)) {
+        if (foundIndex === -1) foundIndex = i
+        if (i - foundIndex + 1 === valLength) return foundIndex * indexSize
+      } else {
+        if (foundIndex !== -1) i -= i - foundIndex
+        foundIndex = -1
+      }
+    }
+  } else {
+    if (byteOffset + valLength > arrLength) byteOffset = arrLength - valLength
+    for (i = byteOffset; i >= 0; i--) {
+      var found = true
+      for (var j = 0; j < valLength; j++) {
+        if (read(arr, i + j) !== read(val, j)) {
+          found = false
+          break
+        }
+      }
+      if (found) return i
     }
   }
 
   return -1
 }
 
-Buffer.prototype.indexOf = function indexOf (val, byteOffset, encoding) {
-  if (typeof byteOffset === 'string') {
-    encoding = byteOffset
-    byteOffset = 0
-  } else if (byteOffset > 0x7fffffff) {
-    byteOffset = 0x7fffffff
-  } else if (byteOffset < -0x80000000) {
-    byteOffset = -0x80000000
-  }
-  byteOffset >>= 0
-
-  if (this.length === 0) return -1
-  if (byteOffset >= this.length) return -1
-
-  // Negative offsets start from the end of the buffer
-  if (byteOffset < 0) byteOffset = Math.max(this.length + byteOffset, 0)
-
-  if (typeof val === 'string') {
-    val = Buffer.from(val, encoding)
-  }
-
-  if (Buffer.isBuffer(val)) {
-    // special case: looking for empty string/buffer always fails
-    if (val.length === 0) {
-      return -1
-    }
-    return arrayIndexOf(this, val, byteOffset, encoding)
-  }
-  if (typeof val === 'number') {
-    if (Buffer.TYPED_ARRAY_SUPPORT && Uint8Array.prototype.indexOf === 'function') {
-      return Uint8Array.prototype.indexOf.call(this, val, byteOffset)
-    }
-    return arrayIndexOf(this, [ val ], byteOffset, encoding)
-  }
-
-  throw new TypeError('val must be string, number or Buffer')
-}
-
 Buffer.prototype.includes = function includes (val, byteOffset, encoding) {
   return this.indexOf(val, byteOffset, encoding) !== -1
+}
+
+Buffer.prototype.indexOf = function indexOf (val, byteOffset, encoding) {
+  return bidirectionalIndexOf(this, val, byteOffset, encoding, true)
+}
+
+Buffer.prototype.lastIndexOf = function lastIndexOf (val, byteOffset, encoding) {
+  return bidirectionalIndexOf(this, val, byteOffset, encoding, false)
 }
 
 function hexWrite (buf, string, offset, length) {
@@ -5388,7 +4723,7 @@ function hexWrite (buf, string, offset, length) {
 
   // must be an even number of digits
   var strLen = string.length
-  if (strLen % 2 !== 0) throw new Error('Invalid hex string')
+  if (strLen % 2 !== 0) throw new TypeError('Invalid hex string')
 
   if (length > strLen / 2) {
     length = strLen / 2
@@ -5409,7 +4744,7 @@ function asciiWrite (buf, string, offset, length) {
   return blitBuffer(asciiToBytes(string), buf, offset, length)
 }
 
-function binaryWrite (buf, string, offset, length) {
+function latin1Write (buf, string, offset, length) {
   return asciiWrite(buf, string, offset, length)
 }
 
@@ -5471,8 +4806,9 @@ Buffer.prototype.write = function write (string, offset, length, encoding) {
       case 'ascii':
         return asciiWrite(this, string, offset, length)
 
+      case 'latin1':
       case 'binary':
-        return binaryWrite(this, string, offset, length)
+        return latin1Write(this, string, offset, length)
 
       case 'base64':
         // Warning: maxLength not taken into account in base64Write
@@ -5613,7 +4949,7 @@ function asciiSlice (buf, start, end) {
   return ret
 }
 
-function binarySlice (buf, start, end) {
+function latin1Slice (buf, start, end) {
   var ret = ''
   end = Math.min(buf.length, end)
 
@@ -6380,14 +5716,14 @@ function isnan (val) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"base64-js":47,"ieee754":52,"isarray":49}],49:[function(require,module,exports){
+},{"base64-js":44,"ieee754":49,"isarray":46}],46:[function(require,module,exports){
 var toString = {}.toString;
 
 module.exports = Array.isArray || function (arr) {
   return toString.call(arr) == '[object Array]';
 };
 
-},{}],50:[function(require,module,exports){
+},{}],47:[function(require,module,exports){
 'use strict'
 
 var hasCaptureStackTrace = 'captureStackTrace' in Error
@@ -6446,7 +5782,7 @@ function nonEnumerableProperty (value) {
   }
 }
 
-},{}],51:[function(require,module,exports){
+},{}],48:[function(require,module,exports){
 /**
  * event-lite.js - Light-weight EventEmitter (less than 1KB when gzipped)
  *
@@ -6628,7 +5964,7 @@ function EventLite() {
 
 })(EventLite);
 
-},{}],52:[function(require,module,exports){
+},{}],49:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = nBytes * 8 - mLen - 1
@@ -6714,1850 +6050,27 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],53:[function(require,module,exports){
-(function (Buffer){
-// int64-buffer.js
-
-/*jshint -W018 */ // Confusing use of '!'.
-/*jshint -W030 */ // Expected an assignment or function call and instead saw an expression.
-/*jshint -W093 */ // Did you mean to return a conditional instead of an assignment?
-
-var Uint64BE, Int64BE, Uint64LE, Int64LE;
-
-!function(exports) {
-  // constants
-
-  var UNDEFINED = "undefined";
-  var BUFFER = (UNDEFINED !== typeof Buffer) && Buffer;
-  var UINT8ARRAY = (UNDEFINED !== typeof Uint8Array) && Uint8Array;
-  var ARRAYBUFFER = (UNDEFINED !== typeof ArrayBuffer) && ArrayBuffer;
-  var ZERO = [0, 0, 0, 0, 0, 0, 0, 0];
-  var isArray = Array.isArray || _isArray;
-  var BIT32 = 4294967296;
-  var BIT24 = 16777216;
-
-  // storage class
-
-  var storage; // Array;
-
-  // generate classes
-
-  Uint64BE = factory("Uint64BE", true, true);
-  Int64BE = factory("Int64BE", true, false);
-  Uint64LE = factory("Uint64LE", false, true);
-  Int64LE = factory("Int64LE", false, false);
-
-  // class factory
-
-  function factory(name, bigendian, unsigned) {
-    var posH = bigendian ? 0 : 4;
-    var posL = bigendian ? 4 : 0;
-    var pos0 = bigendian ? 0 : 3;
-    var pos1 = bigendian ? 1 : 2;
-    var pos2 = bigendian ? 2 : 1;
-    var pos3 = bigendian ? 3 : 0;
-    var fromPositive = bigendian ? fromPositiveBE : fromPositiveLE;
-    var fromNegative = bigendian ? fromNegativeBE : fromNegativeLE;
-    var proto = Int64.prototype;
-    var isName = "is" + name;
-    var _isInt64 = "_" + isName;
-
-    // properties
-    proto.buffer = void 0;
-    proto.offset = 0;
-    proto[_isInt64] = true;
-
-    // methods
-    proto.toNumber = toNumber;
-    proto.toString = toString;
-    proto.toJSON = toNumber;
-    proto.toArray = toArray;
-
-    // add .toBuffer() method only when Buffer available
-    if (BUFFER) proto.toBuffer = toBuffer;
-
-    // add .toArrayBuffer() method only when Uint8Array available
-    if (UINT8ARRAY) proto.toArrayBuffer = toArrayBuffer;
-
-    // isUint64BE, isInt64BE
-    Int64[isName] = isInt64;
-
-    // CommonJS
-    exports[name] = Int64;
-
-    return Int64;
-
-    // constructor
-    function Int64(buffer, offset, value, raddix) {
-      if (!(this instanceof Int64)) return new Int64(buffer, offset, value, raddix);
-      return init(this, buffer, offset, value, raddix);
-    }
-
-    // isUint64BE, isInt64BE
-    function isInt64(b) {
-      return !!(b && b[_isInt64]);
-    }
-
-    // initializer
-    function init(that, buffer, offset, value, raddix) {
-      if (UINT8ARRAY && ARRAYBUFFER) {
-        if (buffer instanceof ARRAYBUFFER) buffer = new UINT8ARRAY(buffer);
-        if (value instanceof ARRAYBUFFER) value = new UINT8ARRAY(value);
-      }
-
-      // Int64BE() style
-      if (!buffer && !offset && !value && !storage) {
-        // shortcut to initialize with zero
-        that.buffer = newArray(ZERO, 0);
-        return;
-      }
-
-      // Int64BE(value, raddix) style
-      if (!isValidBuffer(buffer, offset)) {
-        var _storage = storage || Array;
-        raddix = offset;
-        value = buffer;
-        offset = 0;
-        buffer = new _storage(8);
-      }
-
-      that.buffer = buffer;
-      that.offset = offset |= 0;
-
-      // Int64BE(buffer, offset) style
-      if (UNDEFINED === typeof value) return;
-
-      // Int64BE(buffer, offset, value, raddix) style
-      if ("string" === typeof value) {
-        fromString(buffer, offset, value, raddix || 10);
-      } else if (isValidBuffer(value, raddix)) {
-        fromArray(buffer, offset, value, raddix);
-      } else if ("number" === typeof raddix) {
-        writeInt32(buffer, offset + posH, value); // high
-        writeInt32(buffer, offset + posL, raddix); // low
-      } else if (value > 0) {
-        fromPositive(buffer, offset, value); // positive
-      } else if (value < 0) {
-        fromNegative(buffer, offset, value); // negative
-      } else {
-        fromArray(buffer, offset, ZERO, 0); // zero, NaN and others
-      }
-    }
-
-    function fromString(buffer, offset, str, raddix) {
-      var pos = 0;
-      var len = str.length;
-      var high = 0;
-      var low = 0;
-      if (str[0] === "-") pos++;
-      var sign = pos;
-      while (pos < len) {
-        var chr = parseInt(str[pos++], raddix);
-        if (!(chr >= 0)) break; // NaN
-        low = low * raddix + chr;
-        high = high * raddix + Math.floor(low / BIT32);
-        low %= BIT32;
-      }
-      if (sign) {
-        high = ~high;
-        if (low) {
-          low = BIT32 - low;
-        } else {
-          high++;
-        }
-      }
-      writeInt32(buffer, offset + posH, high);
-      writeInt32(buffer, offset + posL, low);
-    }
-
-    function toNumber() {
-      var buffer = this.buffer;
-      var offset = this.offset;
-      var high = readInt32(buffer, offset + posH);
-      var low = readInt32(buffer, offset + posL);
-      if (!unsigned) high |= 0; // a trick to get signed
-      return high ? (high * BIT32 + low) : low;
-    }
-
-    function toString(radix) {
-      var buffer = this.buffer;
-      var offset = this.offset;
-      var high = readInt32(buffer, offset + posH);
-      var low = readInt32(buffer, offset + posL);
-      var str = "";
-      var sign = !unsigned && (high & 0x80000000);
-      if (sign) {
-        high = ~high;
-        low = BIT32 - low;
-      }
-      radix = radix || 10;
-      while (1) {
-        var mod = (high % radix) * BIT32 + low;
-        high = Math.floor(high / radix);
-        low = Math.floor(mod / radix);
-        str = (mod % radix).toString(radix) + str;
-        if (!high && !low) break;
-      }
-      if (sign) {
-        str = "-" + str;
-      }
-      return str;
-    }
-
-    function writeInt32(buffer, offset, value) {
-      buffer[offset + pos3] = value & 255;
-      value = value >> 8;
-      buffer[offset + pos2] = value & 255;
-      value = value >> 8;
-      buffer[offset + pos1] = value & 255;
-      value = value >> 8;
-      buffer[offset + pos0] = value & 255;
-    }
-
-    function readInt32(buffer, offset) {
-      return (buffer[offset + pos0] * BIT24) +
-        (buffer[offset + pos1] << 16) +
-        (buffer[offset + pos2] << 8) +
-        buffer[offset + pos3];
-    }
-  }
-
-  function toArray(raw) {
-    var buffer = this.buffer;
-    var offset = this.offset;
-    storage = null; // Array
-    if (raw !== false && offset === 0 && buffer.length === 8 && isArray(buffer)) return buffer;
-    return newArray(buffer, offset);
-  }
-
-  function toBuffer(raw) {
-    var buffer = this.buffer;
-    var offset = this.offset;
-    storage = BUFFER;
-    if (raw !== false && offset === 0 && buffer.length === 8 && Buffer.isBuffer(buffer)) return buffer;
-    var dest = new BUFFER(8);
-    fromArray(dest, 0, buffer, offset);
-    return dest;
-  }
-
-  function toArrayBuffer(raw) {
-    var buffer = this.buffer;
-    var offset = this.offset;
-    var arrbuf = buffer.buffer;
-    storage = UINT8ARRAY;
-    if (raw !== false && offset === 0 && (arrbuf instanceof ARRAYBUFFER) && arrbuf.byteLength === 8) return arrbuf;
-    var dest = new UINT8ARRAY(8);
-    fromArray(dest, 0, buffer, offset);
-    return dest.buffer;
-  }
-
-  function isValidBuffer(buffer, offset) {
-    var len = buffer && buffer.length;
-    offset |= 0;
-    return len && (offset + 8 <= len) && ("string" !== typeof buffer[offset]);
-  }
-
-  function fromArray(destbuf, destoff, srcbuf, srcoff) {
-    destoff |= 0;
-    srcoff |= 0;
-    for (var i = 0; i < 8; i++) {
-      destbuf[destoff++] = srcbuf[srcoff++] & 255;
-    }
-  }
-
-  function newArray(buffer, offset) {
-    return Array.prototype.slice.call(buffer, offset, offset + 8);
-  }
-
-  function fromPositiveBE(buffer, offset, value) {
-    var pos = offset + 8;
-    while (pos > offset) {
-      buffer[--pos] = value & 255;
-      value /= 256;
-    }
-  }
-
-  function fromNegativeBE(buffer, offset, value) {
-    var pos = offset + 8;
-    value++;
-    while (pos > offset) {
-      buffer[--pos] = ((-value) & 255) ^ 255;
-      value /= 256;
-    }
-  }
-
-  function fromPositiveLE(buffer, offset, value) {
-    var end = offset + 8;
-    while (offset < end) {
-      buffer[offset++] = value & 255;
-      value /= 256;
-    }
-  }
-
-  function fromNegativeLE(buffer, offset, value) {
-    var end = offset + 8;
-    value++;
-    while (offset < end) {
-      buffer[offset++] = ((-value) & 255) ^ 255;
-      value /= 256;
-    }
-  }
-
-  // https://github.com/retrofox/is-array
-  function _isArray(val) {
-    return !!val && "[object Array]" == Object.prototype.toString.call(val);
-  }
-
-}(typeof exports === 'object' && typeof exports.nodeName !== 'string' ? exports : (this || {}));
-
-}).call(this,require("buffer").Buffer)
-},{"buffer":48}],54:[function(require,module,exports){
-/**
- * Determine if an object is Buffer
+},{}],50:[function(require,module,exports){
+/*!
+ * Determine if an object is a Buffer
  *
- * Author:   Feross Aboukhadijeh <feross@feross.org> <http://feross.org>
- * License:  MIT
- *
- * `npm install is-buffer`
+ * @author   Feross Aboukhadijeh <feross@feross.org> <http://feross.org>
+ * @license  MIT
  */
 
+// The _isBuffer check is for Safari 5-7 support, because it's missing
+// Object.prototype.constructor. Remove this eventually
 module.exports = function (obj) {
-  return !!(obj != null &&
-    (obj._isBuffer || // For Safari 5-7 (missing Object.prototype.constructor)
-      (obj.constructor &&
-      typeof obj.constructor.isBuffer === 'function' &&
-      obj.constructor.isBuffer(obj))
-    ))
+  return obj != null && (isBuffer(obj) || isSlowBuffer(obj) || !!obj._isBuffer)
 }
 
-},{}],55:[function(require,module,exports){
-// browser.js
-
-exports.encode = require("./encode").encode;
-exports.decode = require("./decode").decode;
-
-exports.Encoder = require("./encoder").Encoder;
-exports.Decoder = require("./decoder").Decoder;
-
-exports.createCodec = require("./ext").createCodec;
-exports.codec = require("./codec").codec;
-
-},{"./codec":58,"./decode":60,"./decoder":61,"./encode":63,"./encoder":64,"./ext":67}],56:[function(require,module,exports){
-// util.js
-
-var Int64Buffer = require("int64-buffer");
-var Uint64BE = Int64Buffer.Uint64BE;
-var Int64BE = Int64Buffer.Int64BE;
-
-var MAXBUFLEN = 8192;
-
-exports.writeString = writeString;
-exports.readString = readString;
-exports.byteLength = byteLength;
-exports.copy = copy;
-exports.writeUint64BE = writeUint64BE;
-exports.writeInt64BE = writeInt64BE;
-
-// new Buffer(string, "utf-8") is SLOWER then below
-
-function writeString(string, start) {
-  var buffer = this;
-  var index = start || 0;
-  var length = string.length;
-  // JavaScript's string uses UTF-16 surrogate pairs for characters other than BMP.
-  // This encodes string as CESU-8 which never reaches 4 octets per character.
-  for (var i = 0; i < length; i++) {
-    var chr = string.charCodeAt(i);
-    if (chr < 0x80) {
-      buffer[index++] = chr;
-    } else if (chr < 0x800) {
-      buffer[index++] = 0xC0 | (chr >> 6);
-      buffer[index++] = 0x80 | (chr & 0x3F);
-    } else {
-      buffer[index++] = 0xE0 | (chr >> 12);
-      buffer[index++] = 0x80 | ((chr >> 6) & 0x3F);
-      buffer[index++] = 0x80 | (chr & 0x3F);
-    }
-  }
-  return index - start;
-}
-
-// Buffer.ptototype.toString is 2x FASTER then below
-// https://github.com/feross/buffer may throw "Maximum call stack size exceeded." at String.fromCharCode.apply.
-
-function readString(start, end) {
-  var buffer = this;
-  var index = start - 0 || 0;
-  if (!end) end = buffer.length;
-  var size = end - start;
-  if (size > MAXBUFLEN) size = MAXBUFLEN;
-  var out = [];
-  for (; index < end;) {
-    var array = new Array(size);
-    for (var pos = 0; pos < size && index < end;) {
-      var chr = buffer[index++];
-      chr = (chr < 0x80) ? chr :
-        (chr < 0xE0) ? (((chr & 0x3F) << 6) | (buffer[index++] & 0x3F)) :
-          (((chr & 0x3F) << 12) | ((buffer[index++] & 0x3F) << 6) | ((buffer[index++] & 0x3F)));
-      array[pos++] = chr;
-    }
-    if (pos < size) array = array.slice(0, pos);
-    out.push(String.fromCharCode.apply("", array));
-  }
-  return (out.length > 1) ? out.join("") : out.length ? out.shift() : "";
-}
-
-// Buffer.byteLength is FASTER than below
-
-function byteLength(string) {
-  var length = 0 | 0;
-  Array.prototype.forEach.call(string, function(chr) {
-    var code = chr.charCodeAt(0);
-    length += (code < 0x80) ? 1 : (code < 0x800) ? 2 : 3;
-  });
-  return length;
-}
-
-// https://github.com/feross/buffer lacks descending copying feature
-
-function copy(target, targetStart, start, end) {
-  var i;
-  if (!start) start = 0;
-  if (!end && end !== 0) end = this.length;
-  if (!targetStart) targetStart = 0;
-  var len = end - start;
-
-  if (target === this && start < targetStart && targetStart < end) {
-    // descending
-    for (i = len - 1; i >= 0; i--) {
-      target[i + targetStart] = this[i + start];
-    }
-  } else {
-    // ascending
-    for (i = 0; i < len; i++) {
-      target[i + targetStart] = this[i + start];
-    }
-  }
-
-  return len;
-}
-
-function writeUint64BE(value, offset) {
-  new Uint64BE(this, offset, value);
-}
-
-function writeInt64BE(value, offset) {
-  new Int64BE(this, offset, value);
-}
-
-},{"int64-buffer":53}],57:[function(require,module,exports){
-// buffer-shortage.js
-
-exports.BufferShortageError = BufferShortageError;
-
-BufferShortageError.prototype = Error.prototype;
-
-function BufferShortageError() {
-}
-
-},{}],58:[function(require,module,exports){
-// codec.js
-
-exports.codec = {
-  preset: require("./ext").createCodec({preset: true})
-};
-
-},{"./ext":67}],59:[function(require,module,exports){
-(function (Buffer){
-// decode-buffer.js
-
-exports.DecodeBuffer = DecodeBuffer;
-
-var preset = require("./codec").codec.preset;
-
-var BufferShortageError = require("./buffer-shortage").BufferShortageError;
-
-function DecodeBuffer(options) {
-  if (!(this instanceof DecodeBuffer)) return new DecodeBuffer(options);
-
-  if (options) {
-    this.options = options;
-    if (options.codec) {
-      this.codec = options.codec;
-    }
-  }
-}
-
-DecodeBuffer.prototype.offset = 0;
-
-DecodeBuffer.prototype.push = function(chunk) {
-  var buffers = this.buffers || (this.buffers = []);
-  buffers.push(chunk);
-};
-
-DecodeBuffer.prototype.codec = preset;
-
-DecodeBuffer.prototype.write = function(chunk) {
-  var prev = this.offset ? this.buffer.slice(this.offset) : this.buffer;
-  this.buffer = prev ? (chunk ? Buffer.concat([prev, chunk]) : prev) : chunk;
-  this.offset = 0;
-};
-
-DecodeBuffer.prototype.read = function() {
-  var length = this.buffers && this.buffers.length;
-
-  // fetch the first result
-  if (!length) return this.fetch();
-
-  // flush current buffer
-  this.flush();
-
-  // read from the results
-  return this.pull();
-};
-
-DecodeBuffer.prototype.pull = function() {
-  var buffers = this.buffers || (this.buffers = []);
-  return buffers.shift();
-};
-
-DecodeBuffer.prototype.fetch = function() {
-  return this.codec.decode(this);
-};
-
-DecodeBuffer.prototype.flush = function() {
-  while (this.offset < this.buffer.length) {
-    var start = this.offset;
-    var value;
-    try {
-      value = this.fetch();
-    } catch (e) {
-      if (!(e instanceof BufferShortageError)) throw e;
-      // rollback
-      this.offset = start;
-      break;
-    }
-    this.push(value);
-  }
-};
-
-}).call(this,require("buffer").Buffer)
-},{"./buffer-shortage":57,"./codec":58,"buffer":48}],60:[function(require,module,exports){
-// decode.js
-
-exports.decode = decode;
-
-var DecodeBuffer = require("./decode-buffer").DecodeBuffer;
-
-function decode(input, options) {
-  var decoder = new DecodeBuffer(options);
-  decoder.write(input);
-  return decoder.read();
-}
-},{"./decode-buffer":59}],61:[function(require,module,exports){
-// decoder.js
-
-exports.Decoder = Decoder;
-
-var EventLite = require("event-lite");
-var DecodeBuffer = require("./decode-buffer").DecodeBuffer;
-
-function Decoder(options) {
-  if (!(this instanceof Decoder)) return new Decoder(options);
-  DecodeBuffer.call(this, options);
-}
-
-Decoder.prototype = new DecodeBuffer();
-
-EventLite.mixin(Decoder.prototype);
-
-Decoder.prototype.decode = function(chunk) {
-  if (arguments.length) this.write(chunk);
-  this.flush();
-};
-
-Decoder.prototype.push = function(chunk) {
-  this.emit("data", chunk);
-};
-
-Decoder.prototype.end = function(chunk) {
-  this.decode(chunk);
-  this.emit("end");
-};
-
-},{"./decode-buffer":59,"event-lite":51}],62:[function(require,module,exports){
-(function (Buffer){
-// encode-buffer.js
-
-exports.EncodeBuffer = EncodeBuffer;
-
-var preset = require("./codec").codec.preset;
-
-var MIN_BUFFER_SIZE = 2048;
-var MAX_BUFFER_SIZE = 65536;
-
-function EncodeBuffer(options) {
-  if (!(this instanceof EncodeBuffer)) return new EncodeBuffer(options);
-
-  if (options) {
-    this.options = options;
-    if (options.codec) {
-      this.codec = options.codec;
-    }
-  }
-}
-
-EncodeBuffer.prototype.offset = 0;
-EncodeBuffer.prototype.start = 0;
-
-EncodeBuffer.prototype.push = function(chunk) {
-  var buffers = this.buffers || (this.buffers = []);
-  buffers.push(chunk);
-};
-
-EncodeBuffer.prototype.codec = preset;
-
-EncodeBuffer.prototype.write = function(input) {
-  this.codec.encode(this, input);
-};
-
-EncodeBuffer.prototype.read = function() {
-  var length = this.buffers && this.buffers.length;
-
-  // fetch the first result
-  if (!length) return this.fetch();
-
-  // flush current buffer
-  this.flush();
-
-  // read from the results
-  return this.pull();
-};
-
-EncodeBuffer.prototype.pull = function() {
-  var buffers = this.buffers || (this.buffers = []);
-  var chunk = buffers.length > 1 ? Buffer.concat(buffers) : buffers[0];
-  buffers.length = 0; // buffer exhausted
-  return chunk;
-};
-
-EncodeBuffer.prototype.fetch = function() {
-  var start = this.start;
-  if (start < this.offset) {
-    this.start = this.offset;
-    return this.buffer.slice(start, this.offset);
-  }
-};
-
-EncodeBuffer.prototype.flush = function() {
-  var buffer = this.fetch();
-  if (buffer) this.push(buffer);
-};
-
-EncodeBuffer.prototype.reserve = function(length) {
-  if (this.buffer) {
-    var size = this.buffer.length;
-
-    // is it long enough?
-    if (this.offset + length < size) return;
-
-    // flush current buffer
-    this.flush();
-
-    // resize it to 2x current length
-    length = Math.max(length, Math.min(size * 2, MAX_BUFFER_SIZE));
-  }
-
-  // minimum buffer size
-  length = length > MIN_BUFFER_SIZE ? length : MIN_BUFFER_SIZE;
-
-  // allocate new buffer
-  this.buffer = new Buffer(length);
-  this.start = 0;
-  this.offset = 0;
-};
-
-EncodeBuffer.prototype.send = function(buffer) {
-  var end = this.offset + buffer.length;
-  if (this.buffer && end < this.buffer.length) {
-    buffer.copy(this.buffer, this.offset);
-    this.offset = end;
-  } else {
-    this.flush();
-    this.push(buffer);
-  }
-};
-
-}).call(this,require("buffer").Buffer)
-},{"./codec":58,"buffer":48}],63:[function(require,module,exports){
-// encode.js
-
-exports.encode = encode;
-
-var EncodeBuffer = require("./encode-buffer").EncodeBuffer;
-
-function encode(input, options) {
-  var encoder = new EncodeBuffer(options);
-  encoder.write(input);
-  return encoder.read();
-}
-
-},{"./encode-buffer":62}],64:[function(require,module,exports){
-// encoder.js
-
-exports.Encoder = Encoder;
-
-var EventLite = require("event-lite");
-var EncodeBuffer = require("./encode-buffer").EncodeBuffer;
-
-function Encoder(options) {
-  if (!(this instanceof Encoder)) return new Encoder(options);
-  EncodeBuffer.call(this, options);
-}
-
-Encoder.prototype = new EncodeBuffer();
-
-EventLite.mixin(Encoder.prototype);
-
-Encoder.prototype.encode = function(chunk) {
-  this.write(chunk);
-  this.emit("data", this.read());
-};
-
-Encoder.prototype.end = function(chunk) {
-  if (arguments.length) this.encode(chunk);
-  this.flush();
-  this.emit("end");
-};
-
-},{"./encode-buffer":62,"event-lite":51}],65:[function(require,module,exports){
-// ext-buffer.js
-
-exports.ExtBuffer = ExtBuffer;
-
-function ExtBuffer(buffer, type) {
-  if (!(this instanceof ExtBuffer)) return new ExtBuffer(buffer, type);
-  this.buffer = buffer;
-  this.type = type;
-}
-
-},{}],66:[function(require,module,exports){
-(function (Buffer){
-// ext-preset.js
-
-exports.setExtPreset = setExtPreset;
-
-var _encode, _decode;
-var hasUint8Array = ("undefined" !== typeof Uint8Array);
-var hasFloat64Array = ("undefined" !== typeof Float64Array);
-var hasUint8ClampedArray = ("undefined" !== typeof Uint8ClampedArray);
-
-var ERROR_COLUMNS = {name: 1, message: 1, stack: 1, columnNumber: 1, fileName: 1, lineNumber: 1};
-
-function setExtPreset(codec) {
-  setExtPackers(codec);
-  setExtUnpackers(codec);
-}
-
-function setExtPackers(preset) {
-  preset.addExtPacker(0x0E, Error, [packError, encode]);
-  preset.addExtPacker(0x01, EvalError, [packError, encode]);
-  preset.addExtPacker(0x02, RangeError, [packError, encode]);
-  preset.addExtPacker(0x03, ReferenceError, [packError, encode]);
-  preset.addExtPacker(0x04, SyntaxError, [packError, encode]);
-  preset.addExtPacker(0x05, TypeError, [packError, encode]);
-  preset.addExtPacker(0x06, URIError, [packError, encode]);
-
-  preset.addExtPacker(0x0A, RegExp, [packRegExp, encode]);
-  preset.addExtPacker(0x0B, Boolean, [packValueOf, encode]);
-  preset.addExtPacker(0x0C, String, [packValueOf, encode]);
-  preset.addExtPacker(0x0D, Date, [Number, encode]);
-  preset.addExtPacker(0x0F, Number, [packValueOf, encode]);
-
-  if (hasUint8Array) {
-    preset.addExtPacker(0x11, Int8Array, packBuffer);
-    preset.addExtPacker(0x12, Uint8Array, packBuffer);
-    preset.addExtPacker(0x13, Int16Array, packTypedArray);
-    preset.addExtPacker(0x14, Uint16Array, packTypedArray);
-    preset.addExtPacker(0x15, Int32Array, packTypedArray);
-    preset.addExtPacker(0x16, Uint32Array, packTypedArray);
-    preset.addExtPacker(0x17, Float32Array, packTypedArray);
-
-    if (hasFloat64Array) {
-      // PhantomJS/1.9.7 doesn't have Float64Array
-      preset.addExtPacker(0x18, Float64Array, packTypedArray);
-    }
-
-    if (hasUint8ClampedArray) {
-      // IE10 doesn't have Uint8ClampedArray
-      preset.addExtPacker(0x19, Uint8ClampedArray, packBuffer);
-      preset.addExtUnpacker(0x19, unpackClass(Uint8ClampedArray));
-    }
-
-    preset.addExtPacker(0x1A, ArrayBuffer, packArrayBuffer);
-    preset.addExtPacker(0x1D, DataView, packTypedArray);
-    preset.addExtUnpacker(0x1A, unpackArrayBuffer);
-    preset.addExtUnpacker(0x1D, [unpackArrayBuffer, unpackClass(DataView)]);
-  }
-}
-
-function setExtUnpackers(preset) {
-  preset.addExtPacker(0x0E, Error, [packError, encode]);
-  preset.addExtPacker(0x01, EvalError, [packError, encode]);
-  preset.addExtPacker(0x02, RangeError, [packError, encode]);
-  preset.addExtPacker(0x03, ReferenceError, [packError, encode]);
-  preset.addExtPacker(0x04, SyntaxError, [packError, encode]);
-  preset.addExtPacker(0x05, TypeError, [packError, encode]);
-  preset.addExtPacker(0x06, URIError, [packError, encode]);
-
-  preset.addExtUnpacker(0x0E, [decode, unpackError(Error)]);
-  preset.addExtUnpacker(0x01, [decode, unpackError(EvalError)]);
-  preset.addExtUnpacker(0x02, [decode, unpackError(RangeError)]);
-  preset.addExtUnpacker(0x03, [decode, unpackError(ReferenceError)]);
-  preset.addExtUnpacker(0x04, [decode, unpackError(SyntaxError)]);
-  preset.addExtUnpacker(0x05, [decode, unpackError(TypeError)]);
-  preset.addExtUnpacker(0x06, [decode, unpackError(URIError)]);
-
-  preset.addExtPacker(0x0A, RegExp, [packRegExp, encode]);
-  preset.addExtPacker(0x0B, Boolean, [packValueOf, encode]);
-  preset.addExtPacker(0x0C, String, [packValueOf, encode]);
-  preset.addExtPacker(0x0D, Date, [Number, encode]);
-  preset.addExtPacker(0x0F, Number, [packValueOf, encode]);
-
-  preset.addExtUnpacker(0x0A, [decode, unpackRegExp]);
-  preset.addExtUnpacker(0x0B, [decode, unpackClass(Boolean)]);
-  preset.addExtUnpacker(0x0C, [decode, unpackClass(String)]);
-  preset.addExtUnpacker(0x0D, [decode, unpackClass(Date)]);
-  preset.addExtUnpacker(0x0F, [decode, unpackClass(Number)]);
-
-  if (hasUint8Array) {
-    preset.addExtPacker(0x11, Int8Array, packBuffer);
-    preset.addExtPacker(0x12, Uint8Array, packBuffer);
-    preset.addExtPacker(0x13, Int16Array, packTypedArray);
-    preset.addExtPacker(0x14, Uint16Array, packTypedArray);
-    preset.addExtPacker(0x15, Int32Array, packTypedArray);
-    preset.addExtPacker(0x16, Uint32Array, packTypedArray);
-    preset.addExtPacker(0x17, Float32Array, packTypedArray);
-
-    preset.addExtUnpacker(0x11, unpackClass(Int8Array));
-    preset.addExtUnpacker(0x12, unpackClass(Uint8Array));
-    preset.addExtUnpacker(0x13, [unpackArrayBuffer, unpackClass(Int16Array)]);
-    preset.addExtUnpacker(0x14, [unpackArrayBuffer, unpackClass(Uint16Array)]);
-    preset.addExtUnpacker(0x15, [unpackArrayBuffer, unpackClass(Int32Array)]);
-    preset.addExtUnpacker(0x16, [unpackArrayBuffer, unpackClass(Uint32Array)]);
-    preset.addExtUnpacker(0x17, [unpackArrayBuffer, unpackClass(Float32Array)]);
-
-    if (hasFloat64Array) {
-      // PhantomJS/1.9.7 doesn't have Float64Array
-      preset.addExtPacker(0x18, Float64Array, packTypedArray);
-      preset.addExtUnpacker(0x18, [unpackArrayBuffer, unpackClass(Float64Array)]);
-    }
-
-    if (hasUint8ClampedArray) {
-      // IE10 doesn't have Uint8ClampedArray
-      preset.addExtPacker(0x19, Uint8ClampedArray, packBuffer);
-      preset.addExtUnpacker(0x19, unpackClass(Uint8ClampedArray));
-    }
-
-    preset.addExtPacker(0x1A, ArrayBuffer, packArrayBuffer);
-    preset.addExtPacker(0x1D, DataView, packTypedArray);
-    preset.addExtUnpacker(0x1A, unpackArrayBuffer);
-    preset.addExtUnpacker(0x1D, [unpackArrayBuffer, unpackClass(DataView)]);
-  }
-}
-
-function encode(input) {
-  if (!_encode) _encode = require("./encode").encode; // lazy load
-  return _encode(input);
-}
-
-function decode(input) {
-  if (!_decode) _decode = require("./decode").decode; // lazy load
-  return _decode(input);
-}
-
-function packBuffer(value) {
-  return new Buffer(value);
-}
-
-function packValueOf(value) {
-  return (value).valueOf();
-}
-
-function packRegExp(value) {
-  value = RegExp.prototype.toString.call(value).split("/");
-  value.shift();
-  var out = [value.pop()];
-  out.unshift(value.join("/"));
-  return out;
-}
-
-function unpackRegExp(value) {
-  return RegExp.apply(null, value);
-}
-
-function packError(value) {
-  var out = {};
-  for (var key in ERROR_COLUMNS) {
-    out[key] = value[key];
-  }
-  return out;
-}
-
-function unpackError(Class) {
-  return function(value) {
-    var out = new Class();
-    for (var key in ERROR_COLUMNS) {
-      out[key] = value[key];
-    }
-    return out;
-  };
-}
-
-function unpackClass(Class) {
-  return function(value) {
-    return new Class(value);
-  };
-}
-
-function packTypedArray(value) {
-  return new Buffer(new Uint8Array(value.buffer));
-}
-
-function packArrayBuffer(value) {
-  return new Buffer(new Uint8Array(value));
-}
-
-function unpackArrayBuffer(value) {
-  return (new Uint8Array(value)).buffer;
-}
-
-}).call(this,require("buffer").Buffer)
-},{"./decode":60,"./encode":63,"buffer":48}],67:[function(require,module,exports){
-// ext.js
-
-var IS_ARRAY = require("isarray");
-
-exports.createCodec = createCodec;
-
-var ExtBuffer = require("./ext-buffer").ExtBuffer;
-var ExtPreset = require("./ext-preset");
-var ReadCore = require("./read-core");
-var WriteCore = require("./write-core");
-
-function Codec(options) {
-  if (!(this instanceof Codec)) return new Codec(options);
-  this.extPackers = {};
-  this.extUnpackers = [];
-  this.encode = WriteCore.getEncoder(options);
-  this.decode = ReadCore.getDecoder(options);
-  if (options && options.preset) {
-    ExtPreset.setExtPreset(this);
-  }
-}
-
-function createCodec(options) {
-  return new Codec(options);
-}
-
-Codec.prototype.addExtPacker = function(etype, Class, packer) {
-  if (IS_ARRAY(packer)) {
-    packer = join(packer);
-  }
-  var name = Class.name;
-  if (name && name !== "Object") {
-    this.extPackers[name] = extPacker;
-  } else {
-    var list = this.extEncoderList || (this.extEncoderList = []);
-    list.unshift([Class, extPacker]);
-  }
-
-  function extPacker(value) {
-    var buffer = packer(value);
-    return new ExtBuffer(buffer, etype);
-  }
-};
-
-Codec.prototype.addExtUnpacker = function(etype, unpacker) {
-  this.extUnpackers[etype] = IS_ARRAY(unpacker) ? join(unpacker) : unpacker;
-};
-
-Codec.prototype.getExtPacker = function(value) {
-  var c = value.constructor;
-  var e = c && c.name && this.extPackers[c.name];
-  if (e) return e;
-  var list = this.extEncoderList;
-  if (!list) return;
-  var len = list.length;
-  for (var i = 0; i < len; i++) {
-    var pair = list[i];
-    if (c === pair[0]) return pair[1];
-  }
-};
-
-Codec.prototype.getExtUnpacker = function(type) {
-  return this.extUnpackers[type] || extUnpacker;
-
-  function extUnpacker(buffer) {
-    return new ExtBuffer(buffer, type);
-  }
-};
-
-function join(filters) {
-  filters = filters.slice();
-
-  return function(value) {
-    return filters.reduce(iterator, value);
-  };
-
-  function iterator(value, filter) {
-    return filter(value);
-  }
-}
-
-},{"./ext-buffer":65,"./ext-preset":66,"./read-core":68,"./write-core":71,"isarray":75}],68:[function(require,module,exports){
-// read-core.js
-
-exports.getDecoder = getDecoder;
-
-var readUint8 = require("./read-format").readUint8;
-var ReadToken = require("./read-token");
-
-function getDecoder(options) {
-  var readToken = ReadToken.getReadToken(options);
-  return decode;
-
-  function decode(decoder) {
-    var type = readUint8(decoder);
-    var func = readToken[type];
-    if (!func) throw new Error("Invalid type: " + (type ? ("0x" + type.toString(16)) : type));
-    return func(decoder);
-  }
-}
-
-},{"./read-format":69,"./read-token":70}],69:[function(require,module,exports){
-(function (Buffer){
-// read-format.js
-
-var ieee754 = require("ieee754");
-var Int64Buffer = require("int64-buffer");
-var Uint64BE = Int64Buffer.Uint64BE;
-var Int64BE = Int64Buffer.Int64BE;
-
-exports.getReadFormat = getReadFormat;
-exports.readUint8 = uint8;
-
-var BufferLite = require("./buffer-lite");
-var BufferShortageError = require("./buffer-shortage").BufferShortageError;
-
-var IS_BUFFER_SHIM = ("TYPED_ARRAY_SUPPORT" in Buffer);
-var NO_ASSERT = true;
-
-function getReadFormat(options) {
-  var readFormat = {
-    map: map,
-    array: array,
-    str: str,
-    bin: bin,
-    ext: ext,
-    uint8: uint8,
-    uint16: uint16,
-    uint32: read(4, Buffer.prototype.readUInt32BE),
-    uint64: read(8, readUInt64BE),
-    int8: read(1, Buffer.prototype.readInt8),
-    int16: read(2, Buffer.prototype.readInt16BE),
-    int32: read(4, Buffer.prototype.readInt32BE),
-    int64: read(8, readInt64BE),
-    float32: read(4, readFloatBE),
-    float64: read(8, readDoubleBE)
-  };
-
-  if (options && options.int64) {
-    readFormat.uint64 = read(8, readUInt64BE_int64);
-    readFormat.int64 = read(8, readInt64BE_int64);
-  }
-
-  return readFormat;
-}
-
-function map(decoder, len) {
-  var value = {};
-  var i;
-  var k = new Array(len);
-  var v = new Array(len);
-
-  var decode = decoder.codec.decode;
-  for (i = 0; i < len; i++) {
-    k[i] = decode(decoder);
-    v[i] = decode(decoder);
-  }
-  for (i = 0; i < len; i++) {
-    value[k[i]] = v[i];
-  }
-  return value;
-}
-
-function array(decoder, len) {
-  var value = new Array(len);
-  var decode = decoder.codec.decode;
-  for (var i = 0; i < len; i++) {
-    value[i] = decode(decoder);
-  }
-  return value;
-}
-
-function str(decoder, len) {
-  var start = decoder.offset;
-  var end = decoder.offset = start + len;
-  var buffer = decoder.buffer;
-  if (end > buffer.length) throw new BufferShortageError();
-  if (IS_BUFFER_SHIM || !Buffer.isBuffer(buffer)) {
-    // slower (compat)
-    return BufferLite.readString.call(buffer, start, end);
-  } else {
-    // 2x faster
-    return buffer.toString("utf-8", start, end);
-  }
-}
-
-function bin(decoder, len) {
-  var start = decoder.offset;
-  var end = decoder.offset = start + len;
-  if (end > decoder.buffer.length) throw new BufferShortageError();
-  return slice.call(decoder.buffer, start, end);
-}
-
-function ext(decoder, len) {
-  var start = decoder.offset;
-  var end = decoder.offset = start + len + 1;
-  if (end > decoder.buffer.length) throw new BufferShortageError();
-  var type = decoder.buffer[start];
-  var unpack = decoder.codec.getExtUnpacker(type);
-  if (!unpack) throw new Error("Invalid ext type: " + (type ? ("0x" + type.toString(16)) : type));
-  var buf = slice.call(decoder.buffer, start + 1, end);
-  return unpack(buf);
-}
-
-function uint8(decoder) {
-  var buffer = decoder.buffer;
-  if (decoder.offset >= buffer.length) throw new BufferShortageError();
-  return buffer[decoder.offset++];
-}
-
-function uint16(decoder) {
-  var buffer = decoder.buffer;
-  if (decoder.offset + 2 > buffer.length) throw new BufferShortageError();
-  return (buffer[decoder.offset++] << 8) | buffer[decoder.offset++];
-}
-
-function read(len, method) {
-  return function(decoder) {
-    var start = decoder.offset;
-    var end = decoder.offset = start + len;
-    if (end > decoder.buffer.length) throw new BufferShortageError();
-    return method.call(decoder.buffer, start, NO_ASSERT);
-  };
-}
-
-function readUInt64BE(start) {
-  return new Uint64BE(this, start).toNumber();
-}
-
-function readInt64BE(start) {
-  return new Int64BE(this, start).toNumber();
-}
-
-function readUInt64BE_int64(start) {
-  return new Uint64BE(this, start);
-}
-
-function readInt64BE_int64(start) {
-  return new Int64BE(this, start);
-}
-
-function readFloatBE(start) {
-  if (this.readFloatBE) return this.readFloatBE(start);
-  return ieee754.read(this, start, false, 23, 4);
-}
-
-function readDoubleBE(start) {
-  if (this.readDoubleBE) return this.readDoubleBE(start);
-  return ieee754.read(this, start, false, 52, 8);
-}
-
-function slice(start, end) {
-  var f = this.slice || Array.prototype.slice;
-  var buf = f.call(this, start, end);
-  if (!Buffer.isBuffer(buf)) buf = Buffer(buf);
-  return buf;
-}
-
-}).call(this,require("buffer").Buffer)
-},{"./buffer-lite":56,"./buffer-shortage":57,"buffer":48,"ieee754":52,"int64-buffer":53}],70:[function(require,module,exports){
-// read-token.js
-
-var ReadFormat = require("./read-format");
-
-exports.getReadToken = getReadToken;
-
-function getReadToken(options) {
-  var format = ReadFormat.getReadFormat(options);
-
-  if (options && options.useraw) {
-    return init_useraw(format);
-  } else {
-    return init_token(format);
-  }
-}
-
-function init_token(format) {
-  var i;
-  var token = new Array(256);
-
-  // positive fixint -- 0x00 - 0x7f
-  for (i = 0x00; i <= 0x7f; i++) {
-    token[i] = constant(i);
-  }
-
-  // fixmap -- 0x80 - 0x8f
-  for (i = 0x80; i <= 0x8f; i++) {
-    token[i] = fix(i - 0x80, format.map);
-  }
-
-  // fixarray -- 0x90 - 0x9f
-  for (i = 0x90; i <= 0x9f; i++) {
-    token[i] = fix(i - 0x90, format.array);
-  }
-
-  // fixstr -- 0xa0 - 0xbf
-  for (i = 0xa0; i <= 0xbf; i++) {
-    token[i] = fix(i - 0xa0, format.str);
-  }
-
-  // nil -- 0xc0
-  token[0xc0] = constant(null);
-
-  // (never used) -- 0xc1
-  token[0xc1] = null;
-
-  // false -- 0xc2
-  // true -- 0xc3
-  token[0xc2] = constant(false);
-  token[0xc3] = constant(true);
-
-  // bin 8 -- 0xc4
-  // bin 16 -- 0xc5
-  // bin 32 -- 0xc6
-  token[0xc4] = flex(format.uint8, format.bin);
-  token[0xc5] = flex(format.uint16, format.bin);
-  token[0xc6] = flex(format.uint32, format.bin);
-
-  // ext 8 -- 0xc7
-  // ext 16 -- 0xc8
-  // ext 32 -- 0xc9
-  token[0xc7] = flex(format.uint8, format.ext);
-  token[0xc8] = flex(format.uint16, format.ext);
-  token[0xc9] = flex(format.uint32, format.ext);
-
-  // float 32 -- 0xca
-  // float 64 -- 0xcb
-  token[0xca] = format.float32;
-  token[0xcb] = format.float64;
-
-  // uint 8 -- 0xcc
-  // uint 16 -- 0xcd
-  // uint 32 -- 0xce
-  // uint 64 -- 0xcf
-  token[0xcc] = format.uint8;
-  token[0xcd] = format.uint16;
-  token[0xce] = format.uint32;
-  token[0xcf] = format.uint64;
-
-  // int 8 -- 0xd0
-  // int 16 -- 0xd1
-  // int 32 -- 0xd2
-  // int 64 -- 0xd3
-  token[0xd0] = format.int8;
-  token[0xd1] = format.int16;
-  token[0xd2] = format.int32;
-  token[0xd3] = format.int64;
-
-  // fixext 1 -- 0xd4
-  // fixext 2 -- 0xd5
-  // fixext 4 -- 0xd6
-  // fixext 8 -- 0xd7
-  // fixext 16 -- 0xd8
-  token[0xd4] = fix(1, format.ext);
-  token[0xd5] = fix(2, format.ext);
-  token[0xd6] = fix(4, format.ext);
-  token[0xd7] = fix(8, format.ext);
-  token[0xd8] = fix(16, format.ext);
-
-  // str 8 -- 0xd9
-  // str 16 -- 0xda
-  // str 32 -- 0xdb
-  token[0xd9] = flex(format.uint8, format.str);
-  token[0xda] = flex(format.uint16, format.str);
-  token[0xdb] = flex(format.uint32, format.str);
-
-  // array 16 -- 0xdc
-  // array 32 -- 0xdd
-  token[0xdc] = flex(format.uint16, format.array);
-  token[0xdd] = flex(format.uint32, format.array);
-
-  // map 16 -- 0xde
-  // map 32 -- 0xdf
-  token[0xde] = flex(format.uint16, format.map);
-  token[0xdf] = flex(format.uint32, format.map);
-
-  // negative fixint -- 0xe0 - 0xff
-  for (i = 0xe0; i <= 0xff; i++) {
-    token[i] = constant(i - 0x100);
-  }
-
-  return token;
-}
-
-function init_useraw(format) {
-  var i;
-  var token = getReadToken(format).slice();
-
-  // raw 8 -- 0xd9
-  // raw 16 -- 0xda
-  // raw 32 -- 0xdb
-  token[0xd9] = token[0xc4];
-  token[0xda] = token[0xc5];
-  token[0xdb] = token[0xc6];
-
-  // fixraw -- 0xa0 - 0xbf
-  for (i = 0xa0; i <= 0xbf; i++) {
-    token[i] = fix(i - 0xa0, format.bin);
-  }
-
-  return token;
-}
-
-function constant(value) {
-  return function() {
-    return value;
-  };
-}
-
-function flex(lenFunc, decodeFunc) {
-  return function(decoder) {
-    var len = lenFunc(decoder);
-    return decodeFunc(decoder, len);
-  };
-}
-
-function fix(len, method) {
-  return function(decoder) {
-    return method(decoder, len);
-  };
-}
-
-},{"./read-format":69}],71:[function(require,module,exports){
-// write-core.js
-
-exports.getEncoder = getEncoder;
-
-var WriteType = require("./write-type");
-
-function getEncoder(options) {
-  var writeType = WriteType.getWriteType(options);
-  return encode;
-
-  function encode(encoder, value) {
-    var func = writeType[typeof value];
-    if (!func) throw new Error("Unsupported type \"" + (typeof value) + "\": " + value);
-    func(encoder, value);
-  }
-}
-
-},{"./write-type":73}],72:[function(require,module,exports){
-(function (Buffer){
-// write-token.js
-
-var BufferLite = require("./buffer-lite");
-var uint8 = require("./write-uint8").uint8;
-
-var IS_BUFFER_SHIM = ("TYPED_ARRAY_SUPPORT" in Buffer);
-var NO_TYPED_ARRAY = IS_BUFFER_SHIM && !Buffer.TYPED_ARRAY_SUPPORT;
-
-exports.getWriteToken = getWriteToken;
-
-function getWriteToken(options) {
-  if (NO_TYPED_ARRAY || (options && options.safe)) {
-    return init_safe();
-  } else {
-    return init_token();
-  }
-}
-
-// Node.js and browsers with TypedArray
-
-function init_token() {
-  // (immediate values)
-  // positive fixint -- 0x00 - 0x7f
-  // nil -- 0xc0
-  // false -- 0xc2
-  // true -- 0xc3
-  // negative fixint -- 0xe0 - 0xff
-  var token = uint8.slice();
-
-  // bin 8 -- 0xc4
-  // bin 16 -- 0xc5
-  // bin 32 -- 0xc6
-  token[0xc4] = write1(0xc4);
-  token[0xc5] = write2(0xc5);
-  token[0xc6] = write4(0xc6);
-
-  // ext 8 -- 0xc7
-  // ext 16 -- 0xc8
-  // ext 32 -- 0xc9
-  token[0xc7] = write1(0xc7);
-  token[0xc8] = write2(0xc8);
-  token[0xc9] = write4(0xc9);
-
-  // float 32 -- 0xca
-  // float 64 -- 0xcb
-  token[0xca] = writeN(0xca, 4, Buffer.prototype.writeFloatBE, true);
-  token[0xcb] = writeN(0xcb, 8, Buffer.prototype.writeDoubleBE, true);
-
-  // uint 8 -- 0xcc
-  // uint 16 -- 0xcd
-  // uint 32 -- 0xce
-  // uint 64 -- 0xcf
-  token[0xcc] = write1(0xcc);
-  token[0xcd] = write2(0xcd);
-  token[0xce] = write4(0xce);
-  token[0xcf] = writeN(0xcf, 8, BufferLite.writeUint64BE);
-
-  // int 8 -- 0xd0
-  // int 16 -- 0xd1
-  // int 32 -- 0xd2
-  // int 64 -- 0xd3
-  token[0xd0] = write1(0xd0);
-  token[0xd1] = write2(0xd1);
-  token[0xd2] = write4(0xd2);
-  token[0xd3] = writeN(0xd3, 8, BufferLite.writeUint64BE);
-
-  // str 8 -- 0xd9
-  // str 16 -- 0xda
-  // str 32 -- 0xdb
-  token[0xd9] = write1(0xd9);
-  token[0xda] = write2(0xda);
-  token[0xdb] = write4(0xdb);
-
-  // array 16 -- 0xdc
-  // array 32 -- 0xdd
-  token[0xdc] = write2(0xdc);
-  token[0xdd] = write4(0xdd);
-
-  // map 16 -- 0xde
-  // map 32 -- 0xdf
-  token[0xde] = write2(0xde);
-  token[0xdf] = write4(0xdf);
-
-  return token;
-}
-
-// safe mode: for old browsers and who needs asserts
-
-function init_safe() {
-  // (immediate values)
-  // positive fixint -- 0x00 - 0x7f
-  // nil -- 0xc0
-  // false -- 0xc2
-  // true -- 0xc3
-  // negative fixint -- 0xe0 - 0xff
-  var token = uint8.slice();
-
-  // bin 8 -- 0xc4
-  // bin 16 -- 0xc5
-  // bin 32 -- 0xc6
-  token[0xc4] = writeN(0xc4, 1, Buffer.prototype.writeUInt8);
-  token[0xc5] = writeN(0xc5, 2, Buffer.prototype.writeUInt16BE);
-  token[0xc6] = writeN(0xc6, 4, Buffer.prototype.writeUInt32BE);
-
-  // ext 8 -- 0xc7
-  // ext 16 -- 0xc8
-  // ext 32 -- 0xc9
-  token[0xc7] = writeN(0xc7, 1, Buffer.prototype.writeUInt8);
-  token[0xc8] = writeN(0xc8, 2, Buffer.prototype.writeUInt16BE);
-  token[0xc9] = writeN(0xc9, 4, Buffer.prototype.writeUInt32BE);
-
-  // float 32 -- 0xca
-  // float 64 -- 0xcb
-  token[0xca] = writeN(0xca, 4, Buffer.prototype.writeFloatBE);
-  token[0xcb] = writeN(0xcb, 8, Buffer.prototype.writeDoubleBE);
-
-  // uint 8 -- 0xcc
-  // uint 16 -- 0xcd
-  // uint 32 -- 0xce
-  // uint 64 -- 0xcf
-  token[0xcc] = writeN(0xcc, 1, Buffer.prototype.writeUInt8);
-  token[0xcd] = writeN(0xcd, 2, Buffer.prototype.writeUInt16BE);
-  token[0xce] = writeN(0xce, 4, Buffer.prototype.writeUInt32BE);
-  token[0xcf] = writeN(0xcf, 8, BufferLite.writeUint64BE);
-
-  // int 8 -- 0xd0
-  // int 16 -- 0xd1
-  // int 32 -- 0xd2
-  // int 64 -- 0xd3
-  token[0xd0] = writeN(0xd0, 1, Buffer.prototype.writeInt8);
-  token[0xd1] = writeN(0xd1, 2, Buffer.prototype.writeInt16BE);
-  token[0xd2] = writeN(0xd2, 4, Buffer.prototype.writeInt32BE);
-  token[0xd3] = writeN(0xd3, 8, BufferLite.writeUint64BE);
-
-  // str 8 -- 0xd9
-  // str 16 -- 0xda
-  // str 32 -- 0xdb
-  token[0xd9] = writeN(0xd9, 1, Buffer.prototype.writeUInt8);
-  token[0xda] = writeN(0xda, 2, Buffer.prototype.writeUInt16BE);
-  token[0xdb] = writeN(0xdb, 4, Buffer.prototype.writeUInt32BE);
-
-  // array 16 -- 0xdc
-  // array 32 -- 0xdd
-  token[0xdc] = writeN(0xdc, 2, Buffer.prototype.writeUInt16BE);
-  token[0xdd] = writeN(0xdd, 4, Buffer.prototype.writeUInt32BE);
-
-  // map 16 -- 0xde
-  // map 32 -- 0xdf
-  token[0xde] = writeN(0xde, 2, Buffer.prototype.writeUInt16BE);
-  token[0xdf] = writeN(0xdf, 4, Buffer.prototype.writeUInt32BE);
-
-  return token;
-}
-
-function write1(type) {
-  return function(encoder, value) {
-    encoder.reserve(2);
-    var buffer = encoder.buffer;
-    var offset = encoder.offset;
-    buffer[offset++] = type;
-    buffer[offset++] = value;
-    encoder.offset = offset;
-  };
-}
-
-function write2(type) {
-  return function(encoder, value) {
-    encoder.reserve(3);
-    var buffer = encoder.buffer;
-    var offset = encoder.offset;
-    buffer[offset++] = type;
-    buffer[offset++] = value >>> 8;
-    buffer[offset++] = value;
-    encoder.offset = offset;
-  };
-}
-
-function write4(type) {
-  return function(encoder, value) {
-    encoder.reserve(5);
-    var buffer = encoder.buffer;
-    var offset = encoder.offset;
-    buffer[offset++] = type;
-    buffer[offset++] = value >>> 24;
-    buffer[offset++] = value >>> 16;
-    buffer[offset++] = value >>> 8;
-    buffer[offset++] = value;
-    encoder.offset = offset;
-  };
-}
-
-function writeN(type, len, method, noAssert) {
-  return function(encoder, value) {
-    encoder.reserve(len + 1);
-    encoder.buffer[encoder.offset++] = type;
-    method.call(encoder.buffer, value, encoder.offset, noAssert);
-    encoder.offset += len;
-  };
-}
-
-}).call(this,require("buffer").Buffer)
-},{"./buffer-lite":56,"./write-uint8":74,"buffer":48}],73:[function(require,module,exports){
-(function (Buffer){
-// write-type.js
-
-var IS_ARRAY = require("isarray");
-var Int64Buffer = require("int64-buffer");
-var Uint64BE = Int64Buffer.Uint64BE;
-var Int64BE = Int64Buffer.Int64BE;
-
-var BufferLite = require("./buffer-lite");
-var WriteToken = require("./write-token");
-var uint8 = require("./write-uint8").uint8;
-var ExtBuffer = require("./ext-buffer").ExtBuffer;
-
-var IS_BUFFER_SHIM = ("TYPED_ARRAY_SUPPORT" in Buffer);
-
-var extmap = [];
-extmap[1] = 0xd4;
-extmap[2] = 0xd5;
-extmap[4] = 0xd6;
-extmap[8] = 0xd7;
-extmap[16] = 0xd8;
-
-exports.getWriteType = getWriteType;
-
-function getWriteType(options) {
-  var token = WriteToken.getWriteToken(options);
-
-  var writeType = {
-    "boolean": bool,
-    "function": nil,
-    "number": number,
-    "object": object,
-    "string": string,
-    "symbol": nil,
-    "undefined": nil
-  };
-
-  if (options && options.useraw) {
-    writeType.object = object_raw;
-    writeType.string = string_raw;
-  }
-
-  return writeType;
-
-  // false -- 0xc2
-  // true -- 0xc3
-  function bool(encoder, value) {
-    var type = value ? 0xc3 : 0xc2;
-    token[type](encoder, value);
-  }
-
-  function number(encoder, value) {
-    var ivalue = value | 0;
-    var type;
-    if (value !== ivalue) {
-      // float 64 -- 0xcb
-      type = 0xcb;
-      token[type](encoder, value);
-      return;
-    } else if (-0x20 <= ivalue && ivalue <= 0x7F) {
-      // positive fixint -- 0x00 - 0x7f
-      // negative fixint -- 0xe0 - 0xff
-      type = ivalue & 0xFF;
-    } else if (0 <= ivalue) {
-      // uint 8 -- 0xcc
-      // uint 16 -- 0xcd
-      // uint 32 -- 0xce
-      type = (ivalue <= 0xFF) ? 0xcc : (ivalue <= 0xFFFF) ? 0xcd : 0xce;
-    } else {
-      // int 8 -- 0xd0
-      // int 16 -- 0xd1
-      // int 32 -- 0xd2
-      type = (-0x80 <= ivalue) ? 0xd0 : (-0x8000 <= ivalue) ? 0xd1 : 0xd2;
-    }
-    token[type](encoder, ivalue);
-  }
-
-  // uint 64 -- 0xcf
-  function uint64(encoder, value) {
-    var type = 0xcf;
-    token[type](encoder, value.toArray());
-  }
-
-  // int 64 -- 0xd3
-  function int64(encoder, value) {
-    var type = 0xd3;
-    token[type](encoder, value.toArray());
-  }
-
-  // str 8 -- 0xd9
-  // str 16 -- 0xda
-  // str 32 -- 0xdb
-  // fixstr -- 0xa0 - 0xbf
-  function string(encoder, value) {
-    // prepare buffer
-    var length = value.length;
-    var maxsize = 5 + length * 3;
-    encoder.reserve(maxsize);
-
-    // expected header size
-    var expected = (length < 32) ? 1 : (length <= 0xFF) ? 2 : (length <= 0xFFFF) ? 3 : 5;
-
-    // expected start point
-    var start = encoder.offset + expected;
-
-    // write string
-    length = BufferLite.writeString.call(encoder.buffer, value, start);
-
-    // actual header size
-    var actual = (length < 32) ? 1 : (length <= 0xFF) ? 2 : (length <= 0xFFFF) ? 3 : 5;
-
-    // move content when needed
-    if (expected !== actual) move(encoder, start, length, actual - expected);
-
-    // write header
-    var type = (actual === 1) ? (0xa0 + length) : (actual <= 3) ? 0xd7 + actual : 0xdb;
-    token[type](encoder, length);
-
-    // move cursor
-    encoder.offset += length;
-  }
-
-  function object(encoder, value) {
-    // null
-    if (value === null) return nil(encoder, value);
-
-    // Buffer
-    if (Buffer.isBuffer(value)) return bin(encoder, value);
-
-    // Array
-    if (IS_ARRAY(value)) return array(encoder, value);
-
-    // int64-buffer objects
-    if (Uint64BE.isUint64BE(value)) return uint64(encoder, value);
-    if (Int64BE.isInt64BE(value)) return int64(encoder, value);
-
-    // ext formats
-    var packer = encoder.codec.getExtPacker(value);
-    if (packer) value = packer(value);
-    if (value instanceof ExtBuffer) return ext(encoder, value);
-
-    // plain old objects
-    map(encoder, value);
-  }
-
-  // nil -- 0xc0
-  function nil(encoder, value) {
-    var type = 0xc0;
-    token[type](encoder, value);
-  }
-
-  // fixarray -- 0x90 - 0x9f
-  // array 16 -- 0xdc
-  // array 32 -- 0xdd
-  function array(encoder, value) {
-    var length = value.length;
-    var type = (length < 16) ? (0x90 + length) : (length <= 0xFFFF) ? 0xdc : 0xdd;
-    token[type](encoder, length);
-
-    var encode = encoder.codec.encode;
-    for (var i = 0; i < length; i++) {
-      encode(encoder, value[i]);
-    }
-  }
-
-  // bin 8 -- 0xc4
-  // bin 16 -- 0xc5
-  // bin 32 -- 0xc6
-  function bin(encoder, value) {
-    var length = value.length;
-    var type = (length < 0xFF) ? 0xc4 : (length <= 0xFFFF) ? 0xc5 : 0xc6;
-    token[type](encoder, length);
-    encoder.send(value);
-  }
-
-  // fixext 1 -- 0xd4
-  // fixext 2 -- 0xd5
-  // fixext 4 -- 0xd6
-  // fixext 8 -- 0xd7
-  // fixext 16 -- 0xd8
-  // ext 8 -- 0xc7
-  // ext 16 -- 0xc8
-  // ext 32 -- 0xc9
-  function ext(encoder, value) {
-    var buffer = value.buffer;
-    var length = buffer.length;
-    var type = extmap[length] || ((length < 0xFF) ? 0xc7 : (length <= 0xFFFF) ? 0xc8 : 0xc9);
-    token[type](encoder, length);
-    uint8[value.type](encoder);
-    encoder.send(buffer);
-  }
-
-  // fixmap -- 0x80 - 0x8f
-  // map 16 -- 0xde
-  // map 32 -- 0xdf
-  function map(encoder, value) {
-    var keys = Object.keys(value);
-    var length = keys.length;
-    var type = (length < 16) ? (0x80 + length) : (length <= 0xFFFF) ? 0xde : 0xdf;
-    token[type](encoder, length);
-
-    var encode = encoder.codec.encode;
-    keys.forEach(function(key) {
-      encode(encoder, key);
-      encode(encoder, value[key]);
-    });
-  }
-
-  // raw 16 -- 0xda
-  // raw 32 -- 0xdb
-  // fixraw -- 0xa0 - 0xbf
-  function string_raw(encoder, value) {
-    // prepare buffer
-    var length = value.length;
-    var maxsize = 5 + length * 3;
-    encoder.reserve(maxsize);
-
-    // expected header size
-    var expected = (length < 32) ? 1 : (length <= 0xFFFF) ? 3 : 5;
-
-    // expected start point
-    var start = encoder.offset + expected;
-
-    // write string
-    length = BufferLite.writeString.call(encoder.buffer, value, start);
-
-    // actual header size
-    var actual = (length < 32) ? 1 : (length <= 0xFFFF) ? 3 : 5;
-
-    // move content when needed
-    if (expected !== actual) move(encoder, start, length, actual - expected);
-
-    // write header
-    var type = (length < 32) ? (0xa0 + length) : (length <= 0xFFFF) ? 0xda : 0xdb;
-    token[type](encoder, length);
-
-    // move cursor
-    encoder.offset += length;
-  }
-
-  // raw 16 -- 0xda
-  // raw 32 -- 0xdb
-  // fixraw -- 0xa0 - 0xbf
-  function object_raw(encoder, value) {
-    if (!Buffer.isBuffer(value)) return object(encoder, value);
-
-    var length = value.length;
-    var type = (length < 32) ? (0xa0 + length) : (length <= 0xFFFF) ? 0xda : 0xdb;
-    token[type](encoder, length);
-    encoder.send(value);
-  }
-}
-
-function move(encoder, start, length, diff) {
-  var targetStart = start + diff;
-  var end = start + length;
-  if (IS_BUFFER_SHIM) {
-    BufferLite.copy.call(encoder.buffer, encoder.buffer, targetStart, start, end);
-  } else {
-    encoder.buffer.copy(encoder.buffer, targetStart, start, end);
-  }
-}
-
-}).call(this,require("buffer").Buffer)
-},{"./buffer-lite":56,"./ext-buffer":65,"./write-token":72,"./write-uint8":74,"buffer":48,"int64-buffer":53,"isarray":75}],74:[function(require,module,exports){
-// write-unit8.js
-
-var constant = exports.uint8 = new Array(256);
-
-for (var i = 0x00; i <= 0xFF; i++) {
-  constant[i] = write0(i);
+function isBuffer (obj) {
+  return !!obj.constructor && typeof obj.constructor.isBuffer === 'function' && obj.constructor.isBuffer(obj)
 }
 
-function write0(type) {
-  return function(encoder) {
-    encoder.reserve(1);
-    encoder.buffer[encoder.offset++] = type;
-  };
+// For Node v0.10 support. Remove this eventually.
+function isSlowBuffer (obj) {
+  return typeof obj.readFloatLE === 'function' && typeof obj.slice === 'function' && isBuffer(obj.slice(0, 0))
 }
 
-},{}],75:[function(require,module,exports){
-arguments[4][49][0].apply(exports,arguments)
-},{"dup":49}]},{},[40]);
+},{}]},{},[39]);
