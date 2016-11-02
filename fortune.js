@@ -1,6 +1,6 @@
 /*!
  * Fortune.js
- * Version 5.0.0
+ * Version 5.0.1
  * MIT License
  * http://fortune.js.org
  */
@@ -1058,7 +1058,9 @@ var errors = require('./errors')
 var message = require('./message')
 var castToNumber = require('./cast_to_number')
 var BadRequestError = errors.BadRequestError
-var buffer = Buffer.from || Buffer
+var buffer = Buffer.from || function (input, encoding) {
+  return new Buffer(input, encoding)
+}
 
 
 var castByType = [
@@ -3199,10 +3201,7 @@ Fortune.prototype.constructor = function Fortune (recordTypes, options) {
     adapter: { value: adapter, enumerable: true, configurable: true },
 
     // Dispatch.
-    flows: { value: flows },
-
-    // Useful for dependency injection.
-    common: { value: common, enumerable: true }
+    flows: { value: flows }
   })
 }
 
@@ -3430,6 +3429,11 @@ Fortune.prototype.disconnect = function () {
     })
   })
 }
+
+
+// Useful for dependency injection. All instances of Fortune have the same
+// common internal dependencies.
+Fortune.prototype.common = common
 
 
 // Assign useful static properties to the default export.
