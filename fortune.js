@@ -2921,7 +2921,6 @@ var plainObject = {}
  * - `message`: a function which accepts the arguments (`id`, `language`,
  *   `data`). It has properties keyed by two-letter language codes, which by
  *   default includes only `en`.
- * - `common`: common dependencies object, containing the above and more.
  */
 function Fortune (recordTypes, options) {
   if (!(this instanceof Fortune)) return new Fortune(recordTypes, options)
