@@ -1,6 +1,6 @@
 /*!
  * Fortune.js
- * Version 5.0.1
+ * Version 5.0.2
  * MIT License
  * http://fortune.js.org
  */
@@ -2923,7 +2923,9 @@ var plainObject = {}
  *   default includes only `en`.
  */
 function Fortune (recordTypes, options) {
-  if (!(this instanceof Fortune)) return new Fortune(recordTypes, options)
+  if (!(this instanceof Fortune))
+    return new Fortune(recordTypes, options)
+
   this.constructor(recordTypes, options)
 }
 
@@ -3120,7 +3122,7 @@ Fortune.prototype = Object.create(EventLite.prototype)
  *
  * The return value of the constructor is the instance itself.
  *
- * @param {Object} recordTypes
+ * @param {Object} [recordTypes]
  * @param {Object} [options]
  * @return {Fortune}
  */
@@ -3128,12 +3130,7 @@ Fortune.prototype.constructor = function Fortune (recordTypes, options) {
   var self = this
   var adapter, method, stack, flows, type, hooks, i, j
 
-  if (typeof recordTypes !== 'object')
-    throw new TypeError('First argument must be an object.')
-
-  if (!Object.keys(recordTypes).length)
-    throw new Error('At least one type must be specified.')
-
+  if (recordTypes === void 0) recordTypes = {}
   if (options === void 0) options = {}
 
   if (!('adapter' in options)) options.adapter = [ memoryAdapter(Adapter) ]
