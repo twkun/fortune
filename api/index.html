@@ -434,7 +434,12 @@ Integer.prototype = <span class="hljs-built_in">Object</span>.create(<span class
         --><span class="arrow">⇒</span><!--
         --><span class="return">Function</span><!--
         --><!--
-      --><a href="#fortunehttp-createlistener" class="anchor">#</a></h2><p><strong>Node.js only</strong>: This function implements a HTTP server for Fortune. It determines which serializer to use, assigns request headers to the <code>meta</code> object, reads the request body, and maps the response from the <code>request</code> method on to the HTTP response. The listener function ends the response and returns a promise that is resolved when the response is ended. The returned promise may be rejected with the error response, providing a hook for error logging.</p><p>The options object may be formatted as follows:</p><pre><code class="lang-js">{
+      --><a href="#fortunehttp-createlistener" class="anchor">#</a></h2><p><strong>Node.js only</strong>: This function implements a HTTP server for Fortune. It determines which serializer to use, assigns request headers to the <code>meta</code> object, reads the request body, and maps the response from the <code>request</code> method on to the HTTP response. The listener function ends the response and returns a promise that is resolved when the response is ended. The returned promise may be rejected with the error response, providing a hook for error logging. <strong>IMPORTANT</strong>: the returned Promise must be caught:</p><pre><code class="lang-js">listener(request, response)
+.catch(<span class="hljs-function"><span class="hljs-params">error</span> =&gt;</span> {
+  <span class="hljs-comment">// Important: the returned Promise must be caught so that there are no</span>
+  <span class="hljs-comment">// unhandled exceptions.</span>
+})
+</code></pre><p>The options object may be formatted as follows:</p><pre><code class="lang-js">{
   <span class="hljs-comment">// An array of HTTP serializers, ordered by priority. Defaults to ad hoc</span>
   <span class="hljs-comment">// JSON and form serializers if none are specified. If a serializer value</span>
   <span class="hljs-comment">// is not an array, its settings will be considered omitted.</span>
