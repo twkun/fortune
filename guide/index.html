@@ -48,7 +48,6 @@ https://github.com/fortunejs/fortune/tree/master/website
 
 <span class="hljs-keyword">const</span> store = fortune(recordTypes, { hooks })
 </code></pre><p>All of the arguments for the I/O hooks may be mutated. Any custom errors thrown will be displayed to client, while operational errors will be hidden (native errors such as <code>Error</code>).</p><p>For example, dealing with input for the <code>user</code> record type, a variety of authorization cases need to be handled. When creating a user, the name and password fields must be checked and the password must be encrypted, while updating and deleting require an authorization check.</p><pre><code class="lang-js"><span class="hljs-keyword">const</span> { methods, <span class="hljs-attr">errors</span>: { BadRequestError } } = fortune
-<span class="hljs-keyword">const</span> hashAlgorithm = <span class="hljs-string">'SHA256'</span>
 
 <span class="hljs-function"><span class="hljs-keyword">function</span> <span class="hljs-title">userInput</span> (<span class="hljs-params">context, record, update</span>) </span>{
   <span class="hljs-keyword">const</span> { <span class="hljs-attr">request</span>: { method, <span class="hljs-attr">meta</span>: { language } } } = context
@@ -81,7 +80,9 @@ https://github.com/fortunejs/fortune/tree/master/website
     <span class="hljs-keyword">return</span> validateUser(context, record.id)
   }
 }
-</code></pre><p>The password hashing function is an implementation detail. In this example, a hash function is used for the sake of simplicity, though a key derivation function or stronger should be used in real applications.</p><pre><code class="lang-js"><span class="hljs-function"><span class="hljs-keyword">function</span> <span class="hljs-title">makePassword</span> (<span class="hljs-params">string</span>) </span>{
+</code></pre><p>The password hashing function is an implementation detail. In this example, a hash function is used for the sake of simplicity, though a key derivation function or stronger should be used in real applications.</p><pre><code class="lang-js"><span class="hljs-keyword">const</span> hashAlgorithm = <span class="hljs-string">'SHA256'</span>
+
+<span class="hljs-function"><span class="hljs-keyword">function</span> <span class="hljs-title">makePassword</span> (<span class="hljs-params">string</span>) </span>{
   <span class="hljs-keyword">const</span> salt = crypto.randomBytes(<span class="hljs-number">32</span>)
   <span class="hljs-keyword">const</span> password = crypto.createHash(hashAlgorithm)
     .update(salt).update(<span class="hljs-string">''</span> + string).digest()
